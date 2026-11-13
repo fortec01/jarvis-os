@@ -1,0 +1,3 @@
+#!/bin/sh
+# webfetch — wrapper so Jarvis can call the Scrapling reader by name.
+exec /opt/jarvisos/venv/bin/python /opt/jarvisos/tools/webfetch.py "$@"
