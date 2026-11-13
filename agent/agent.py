@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""JarvisOS agent core v0.4.2 — zero-dependency (Python stdlib only).
+"""JarvisOS agent core v0.5 — zero-dependency (Python stdlib only).
 
 Jarvis's whole computer in one small process:
   GET  /healthz      ok check (no auth)
@@ -22,6 +22,17 @@ Jarvis's whole computer in one small process:
   POST /watch/input  {kind: click|type|key|scroll, ...} — eres
                      takes the wheel: input forwarded into the
                      page over the same CDP session
+  GET  /download     ?path= workspace file, with HTTP Range
+                     (seekable media, phone downloads)
+  GET  /music/search ?q= YouTube candidates for the music panel
+  POST /music/play   {query|url|videoId, hints...} resolve a song
+                     (Spotify links matched SpotDL-style), start
+                     its cache download, return stream/play URLs,
+                     palette and synced lyrics
+  GET  /stream       ?id= progressive play of a song still caching
+  GET  /music/status ?id= cache state for one song
+  GET  /music/list   the cached library
+  GET  /music/lyrics ?videoId=&title=&artist=&duration= LRCLIB
 
 v0.4 adds the watch layer: Moli (Apache-2.0, Rust headless
 browser with on-demand layout) runs `serve --layout` on demand;
@@ -36,9 +47,23 @@ Workspace persistence: if JARVIS_GIT_REPO is set, the workspace is
 cloned/pulled at boot and auto-committed+pushed (debounced) after
 work — the Render disk is disposable, the git repo is home.
 Auth: X-Jarvis-Token header must equal JARVIS_PC_TOKEN.
+
+v0.5 is the music release ("a perfect one to enjoy music"):
+songs resolve through the tools already proven on this box —
+Invidious for the catalogue, Cobalt for the audio bytes, a
+SpotDL-grade matcher (fuzzy title/artist, exp duration curve,
+forbidden-words penalty) so a pasted Spotify link lands on the
+right version — then stream progressively while a background
+thread caches the MP3; replays are instant and seekable via
+/download's Range support. Lyrics come from LRCLIB (line-synced;
+the face interpolates word timing Verci-style) and the player
+glow palette is extracted from the album art with Pillow (the
+one non-stdlib piece, already in the image for the shell).
 """
 import base64
+import difflib
 import json
+import math
 import os
 import queue
 import re
@@ -52,7 +77,7 @@ import threading
 import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote
 
 PORT = int(os.environ.get("PORT", "10000"))
 TOKEN = os.environ.get("JARVIS_PC_TOKEN", "")
@@ -705,9 +730,449 @@ class WatchSession:
 WATCH = WatchSession()
 
 
+# ---------------------------------------------------------------- music
+MUSIC_DIR = os.path.join(WORKSPACE, "music")
+MUSIC_INDEX = os.path.join(MUSIC_DIR, "index.json")
+UA = "JarvisOS/0.5 music (personal use)"
+COBALT_SEEDS = [s for s in [os.environ.get("GETMEDIA_API", ""),
+                            "https://api.cobalt.liubquanti.click",
+                            "https://cobalt-api.kwiatekmiki.com",
+                            "https://api.cobalt.canine.tools"] if s]
+FORBIDDEN_WORDS = ["remix", "remaster", "remastered", "live", "acoustic",
+                   "cover", "karaoke", "instrumental", "slowed", "reverb",
+                   "bassboost", "bassboosted", "8daudio", "concert", "acapella"]
+_index_lock = threading.Lock()
+_dl_state = {}  # videoId -> {"done": bool, "error": str|None, "bytes": int}
+_inv_cache = {"hosts": [], "ts": 0.0}
+
+
+def _http(url, timeout=20, data=None, ctype=None):
+    req = urllib.request.Request(url, data=data, method="POST" if data else "GET")
+    req.add_header("User-Agent", UA)
+    if ctype:
+        req.add_header("Content-Type", ctype)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.status, r.read()
+
+
+def _http_json(url, timeout=20):
+    _, body = _http(url, timeout=timeout)
+    return json.loads(body)
+
+
+def _inv_hosts():
+    if _inv_cache["hosts"] and time.time() - _inv_cache["ts"] < 3600:
+        return _inv_cache["hosts"]
+    hosts = ["yt.chocolatemoo53.com"]
+    try:
+        data = _http_json("https://api.invidious.io/instances.json", timeout=15)
+        for name, info in data:
+            if info.get("api") and info.get("type") == "https" and name not in hosts:
+                hosts.append(name)
+            if len(hosts) >= 6:
+                break
+    except Exception:
+        pass
+    _inv_cache.update(hosts=hosts, ts=time.time())
+    return hosts
+
+
+def _inv_get(path):
+    last = None
+    for host in _inv_hosts():
+        try:
+            return _http_json(f"https://{host}{path}", timeout=18), host
+        except Exception as e:
+            last = e
+    raise RuntimeError(f"all invidious instances failed: {last}")
+
+
+def _thumb(item, host):
+    thumbs = item.get("videoThumbnails") or []
+    best = None
+    for t in thumbs:
+        url = t.get("url", "")
+        if url.startswith("/"):
+            url = f"https://{host}{url}"
+        if not best or (t.get("width", 0) <= 480 and t.get("width", 0) > best[0]):
+            best = (t.get("width", 0), url)
+    if best:
+        return best[1]
+    vid = item.get("videoId", "")
+    return f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg" if vid else ""
+
+
+def yt_search(query, limit=12):
+    data, host = _inv_get("/api/v1/search?type=video&q=" + quote(query))
+    out = []
+    for it in data[:limit]:
+        if it.get("type") not in (None, "video") or not it.get("videoId"):
+            continue
+        out.append({"videoId": it["videoId"], "title": it.get("title", ""),
+                    "author": it.get("author", ""),
+                    "duration": it.get("lengthSeconds", 0),
+                    "art": _thumb(it, host)})
+    return out
+
+
+def yt_info(video_id):
+    data, _ = _inv_get(f"/api/v1/videos/{video_id}")
+    return {"videoId": video_id, "title": data.get("title", ""),
+            "author": data.get("author", ""),
+            "duration": data.get("lengthSeconds", 0),
+            "art": f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"}
+
+
+def _slug(s):
+    return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+
+
+def _ratio(a, b):
+    return difflib.SequenceMatcher(None, _slug(a), _slug(b)).ratio() * 100
+
+
+def clean_title(title):
+    t = re.sub(r"\s*[\(\[][^\]\)]*(official|video|audio|lyric|lyrics|mv|hd|4k|visualizer)[^\]\)]*[\)\]]",
+               "", title or "", flags=re.I)
+    t = re.sub(r"\s+", " ", t).strip(" -|")
+    return t or (title or "")
+
+
+def primary_artist(artist):
+    a = re.split(r"\s*(?:,|&|feat\.?|ft\.?|featuring)\s*", artist or "", flags=re.I)[0]
+    return a.strip() or (artist or "")
+
+
+def score_candidate(song, cand):
+    """SpotDL-grade match score (0..~110) for one YouTube candidate."""
+    stitle, sartist, sdur = song["title"], song.get("artist", ""), song.get("duration", 0)
+    name = _ratio(stitle, cand["title"])
+    author = max(_ratio(sartist, cand.get("author", "")),
+                 90.0 if _slug(sartist) and _slug(sartist) in _slug(cand["title"]) else 0.0,
+                 90.0 if _slug(sartist) and _slug(sartist) in _slug(cand.get("author", "")) else 0.0)
+    cdur = cand.get("duration", 0)
+    dur = math.exp(-0.1 * abs(sdur - cdur)) * 100 if sdur and cdur else 55.0
+    cslug, sslug = _slug(cand["title"]), _slug(stitle)
+    for w in FORBIDDEN_WORDS:
+        if w in cslug.split() and w not in sslug.split():
+            name -= 15
+    bonus = 0.0
+    if "official audio" in cslug:
+        bonus += 8
+    if cand.get("author", "").strip().lower().endswith("- topic"):
+        bonus += 8
+    if "official video" in cslug:
+        bonus += 4
+    total = 0.45 * name + 0.25 * author + 0.30 * dur + bonus
+    return {"score": round(total, 1), "name": round(name, 1),
+            "artist": round(author, 1), "duration": round(dur, 1)}
+
+
+def best_match(song, candidates):
+    scored = []
+    for c in candidates:
+        s = score_candidate(song, c)
+        if s["name"] <= 40 or s["duration"] < 20:
+            continue  # SpotDL's hard gates, loosened a notch
+        scored.append((s["score"], c, s))
+    scored.sort(key=lambda x: -x[0])
+    return scored[0] if scored else (None, None, None)
+
+
+def spotify_meta(url):
+    """Track metadata from Spotify's public embed/oEmbed — no login."""
+    m = re.search(r"/track/([A-Za-z0-9]+)", url)
+    if not m:
+        raise RuntimeError("only open.spotify.com/track links are supported")
+    tid = m.group(1)
+    out = {"title": "", "artist": "", "duration": 0, "art": ""}
+    try:
+        oe = _http_json("https://open.spotify.com/oembed?url=" + quote(url, safe=""), timeout=15)
+        out["title"] = oe.get("title", "")
+        out["art"] = oe.get("thumbnail_url", "")
+    except Exception:
+        pass
+    try:
+        _, html = _http(f"https://open.spotify.com/embed/track/{tid}", timeout=15)
+        h = html.decode(errors="replace")
+        nd = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', h, re.S)
+        if nd:
+            ent = json.loads(nd.group(1))["props"]["pageProps"]["state"]["data"]["entity"]
+            out["title"] = ent.get("name") or ent.get("title") or out["title"]
+            arts = [a.get("name", "") for a in (ent.get("artists") or []) if a.get("name")]
+            if arts:
+                out["artist"] = ", ".join(arts)
+            if ent.get("duration"):
+                out["duration"] = int(ent["duration"]) // 1000
+        if not out["duration"]:
+            dm = re.search(r'"duration":\s*(\d+)', h)
+            if dm:
+                out["duration"] = int(dm.group(1)) // 1000
+        if not out["artist"]:
+            am = (re.search(r'"artists":\[\{"name":"([^"]+)"', h)
+                  or re.search(r'"subtitle":"([^"]+)"', h))
+            if am:
+                out["artist"] = am.group(1)
+        if not out["title"]:
+            tm = re.search(r'"name":"([^"]{2,120})"', h)
+            if tm:
+                out["title"] = tm.group(1)
+    except Exception:
+        pass
+    if not out["title"]:
+        raise RuntimeError("could not read that Spotify track")
+    return out
+
+
+def load_index():
+    try:
+        with open(MUSIC_INDEX) as f:
+            return json.load(f)
+    except Exception:
+        return {"songs": {}}
+
+
+def save_index(idx):
+    os.makedirs(MUSIC_DIR, exist_ok=True)
+    tmp = MUSIC_INDEX + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(idx, f, indent=1)
+    os.replace(tmp, MUSIC_INDEX)
+
+
+def song_file(video_id):
+    return os.path.join(MUSIC_DIR, video_id + ".mp3")
+
+
+def is_cached(video_id):
+    p = song_file(video_id)
+    return os.path.isfile(p) and os.path.getsize(p) > 20000
+
+
+def _cobalt_audio_url(video_id):
+    payload = json.dumps({"url": f"https://www.youtube.com/watch?v={video_id}",
+                          "videoQuality": "720", "downloadMode": "audio",
+                          "audioFormat": "mp3", "filenameStyle": "basic"}).encode()
+    last = None
+    for api in COBALT_SEEDS:
+        try:
+            _, body = _http(api + "/", timeout=30, data=payload, ctype="application/json")
+            res = json.loads(body)
+            status = res.get("status")
+            if status in ("tunnel", "redirect", "local-processing") and res.get("url"):
+                return res["url"]
+            if status == "picker":
+                for item in res.get("picker", []):
+                    if item.get("url"):
+                        return item["url"]
+                if res.get("audio"):
+                    return res["audio"]
+            last = RuntimeError(f"cobalt {api}: {status} {res.get('error', '')}")
+        except Exception as e:
+            last = e
+    raise RuntimeError(f"cobalt failed everywhere: {last}")
+
+
+def _download(video_id):
+    st = _dl_state.setdefault(video_id, {"done": False, "error": None, "bytes": 0})
+    part = song_file(video_id) + ".part"
+    try:
+        os.makedirs(MUSIC_DIR, exist_ok=True)
+        src = _cobalt_audio_url(video_id)
+        req = urllib.request.Request(src)
+        req.add_header("User-Agent", UA)
+        with urllib.request.urlopen(req, timeout=60) as r, open(part, "wb") as f:
+            while True:
+                chunk = r.read(65536)
+                if not chunk:
+                    break
+                f.write(chunk)
+                st["bytes"] += len(chunk)
+                if st["bytes"] > 60 * 1024 * 1024:
+                    raise RuntimeError("file too large for a song")
+        if st["bytes"] < 20000:
+            raise RuntimeError("downloaded file suspiciously small")
+        os.replace(part, song_file(video_id))
+        with _index_lock:
+            idx = load_index()
+            if video_id in idx["songs"]:
+                idx["songs"][video_id]["cached"] = True
+                save_index(idx)
+        st["done"] = True
+    except Exception as e:
+        st["error"] = str(e)[:200]
+        try:
+            os.remove(part)
+        except Exception:
+            pass
+
+
+def ensure_download(video_id):
+    if is_cached(video_id):
+        return "cached"
+    st = _dl_state.get(video_id)
+    if st and not st["done"] and not st["error"]:
+        return "streaming"
+    if st and st["error"]:
+        _dl_state.pop(video_id, None)
+    threading.Thread(target=_download, args=(video_id,), daemon=True).start()
+    return "streaming"
+
+
+def palette_for(art_url, video_id):
+    """Two glow colours from the album art (Pillow, cached in index)."""
+    if not art_url:
+        return None
+    try:
+        import io
+        from PIL import Image
+        _, data = _http(art_url, timeout=12)
+        im = Image.open(io.BytesIO(data[:800_000])).convert("RGB")
+        im.thumbnail((96, 96))
+        q = im.quantize(colors=6)
+        pal, counts = q.getpalette(), sorted(q.getcolors() or [], reverse=True)
+        cols = []
+        for _, ci in counts:
+            r, g, b = pal[ci * 3:ci * 3 + 3]
+            mx, mn = max(r, g, b), min(r, g, b)
+            if mx < 28 or (mx - mn) < 18 and len(cols) == 0 and len(counts) > 1:
+                continue  # skip muddy near-black/grey as the lead colour
+            cols.append("#%02x%02x%02x" % (r, g, b))
+            if len(cols) == 2:
+                break
+        return cols or None
+    except Exception:
+        return None
+
+
+def parse_lrc(text):
+    lines = []
+    for raw in (text or "").splitlines():
+        stamps = re.findall(r"\[(\d+):(\d+(?:\.\d+)?)\]", raw)
+        lyric = re.sub(r"\[\d+:\d+(?:\.\d+)?\]", "", raw).strip()
+        for mm, ss in stamps:
+            lines.append({"t": int(mm) * 60 + float(ss), "text": lyric})
+    lines.sort(key=lambda x: x["t"])
+    return lines
+
+
+def fetch_lyrics(title, artist, duration):
+    """LRCLIB: line-synced lyrics for the song, or plain, or None."""
+    q = (f"https://lrclib.net/api/search?track_name={quote(clean_title(title))}"
+         f"&artist_name={quote(primary_artist(artist))}")
+    try:
+        results = _http_json(q, timeout=15)
+    except Exception:
+        return None
+    best_synced, best_plain, best_gap = None, None, 1e9
+    for r in results:
+        gap = abs((r.get("duration") or 0) - (duration or 0)) if duration else 0
+        if r.get("syncedLyrics") and gap < best_gap:
+            best_synced, best_gap = r, gap
+        if r.get("plainLyrics") and (best_plain is None or gap < abs((best_plain.get("duration") or 0) - (duration or 0))):
+            best_plain = r
+    if best_synced:
+        return {"lines": parse_lrc(best_synced["syncedLyrics"]), "synced": True}
+    if best_plain:
+        return {"lines": [{"t": None, "text": ln} for ln in best_plain["plainLyrics"].splitlines()],
+                "synced": False}
+    return None
+
+
+def lyrics_for(song):
+    cache = os.path.join(MUSIC_DIR, song["videoId"] + ".lyrics.json")
+    try:
+        with open(cache) as f:
+            return json.load(f)
+    except Exception:
+        pass
+    lyr = fetch_lyrics(song["title"], song.get("artist", ""), song.get("duration", 0))
+    if lyr:
+        try:
+            os.makedirs(MUSIC_DIR, exist_ok=True)
+            with open(cache, "w") as f:
+                json.dump(lyr, f)
+        except Exception:
+            pass
+    return lyr
+
+
+def resolve_play(req):
+    """Turn {query|url|videoId} into a playable song record."""
+    url = (req.get("url") or "").strip()
+    query = (req.get("query") or "").strip()
+    video_id = (req.get("videoId") or "").strip()
+    song = None
+    if url and "spotify.com" in url:
+        meta = spotify_meta(url)
+        song = {"title": meta["title"], "artist": meta["artist"],
+                "duration": meta["duration"], "art": meta["art"]}
+        cands = yt_search(f"{meta['title']} {meta['artist']}".strip())
+        _, best, sc = best_match(song, cands)
+        if not best:
+            raise RuntimeError("no matching version found on YouTube")
+        video_id = best["videoId"]
+        song["videoId"] = video_id
+        song["match"] = sc
+        if not song["duration"]:
+            song["duration"] = best["duration"]
+    elif url or (video_id and not req.get("title")):
+        m = re.search(r"(?:v=|youtu\.be/|/shorts/|/embed/)([A-Za-z0-9_-]{11})", url or "")
+        video_id = video_id or (m.group(1) if m else "")
+        if not video_id:
+            raise RuntimeError("could not read a YouTube video id from that link")
+        info = yt_info(video_id)
+        song = {"videoId": video_id, "title": clean_title(info["title"]),
+                "artist": info["author"].replace(" - Topic", ""),
+                "duration": info["duration"], "art": info["art"]}
+    elif video_id:
+        song = {"videoId": video_id, "title": clean_title(req.get("title", "")),
+                "artist": (req.get("artist") or "").replace(" - Topic", ""),
+                "duration": int(req.get("duration") or 0),
+                "art": req.get("art") or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"}
+    elif query:
+        cands = yt_search(query)
+        if not cands:
+            raise RuntimeError("no results for that search")
+        top = cands[0]
+        probe = {"title": clean_title(query), "artist": "", "duration": top["duration"]}
+        _, best, _ = best_match(probe, cands)
+        best = best or top
+        video_id = best["videoId"]
+        song = {"videoId": video_id, "title": clean_title(best["title"]),
+                "artist": best["author"].replace(" - Topic", ""),
+                "duration": best["duration"], "art": best["art"]}
+    else:
+        raise RuntimeError("give a query, a Spotify/YouTube link, or a videoId")
+    state = ensure_download(video_id)
+    with _index_lock:
+        idx = load_index()
+        rec = idx["songs"].get(video_id, {})
+        rec.update({k: song[k] for k in ("title", "artist", "duration", "art") if k in song})
+        rec["videoId"] = video_id
+        rec["cached"] = is_cached(video_id)
+        idx["songs"][video_id] = rec
+        save_index(idx)
+    if not rec.get("palette"):
+        pal = palette_for(rec.get("art", ""), video_id)
+        if pal:
+            with _index_lock:
+                idx = load_index()
+                idx["songs"][video_id]["palette"] = pal
+                save_index(idx)
+                rec["palette"] = pal
+    return {"videoId": video_id, "title": rec.get("title", song["title"]),
+            "artist": rec.get("artist", ""), "duration": rec.get("duration", 0),
+            "art": rec.get("art", ""), "palette": rec.get("palette"),
+            "state": state,
+            "url": ("/download?path=" + quote("music/" + video_id + ".mp3")
+                    if state == "cached" else f"/stream?id={video_id}"),
+            "match": song.get("match"), "lyrics": lyrics_for(rec)}
+
+
 # ---------------------------------------------------------------- http
 class Handler(BaseHTTPRequestHandler):
-    server_version = "JarvisOS/0.4.2"
+    server_version = "JarvisOS/0.5"
 
     def log_message(self, *args):
         pass
@@ -727,6 +1192,89 @@ class Handler(BaseHTTPRequestHandler):
     def _authed(self):
         return bool(TOKEN) and self.headers.get("X-Jarvis-Token") == TOKEN
 
+    _CTYPES = {".mp3": "audio/mpeg", ".jpg": "image/jpeg", ".png": "image/png",
+               ".mp4": "video/mp4", ".json": "application/json",
+               ".md": "text/plain", ".txt": "text/plain"}
+
+    def _send_file(self, rel):
+        """Workspace file with HTTP Range — seekable media + downloads."""
+        target = os.path.abspath(os.path.join(WORKSPACE, rel))
+        if not target.startswith(WORKSPACE) or not os.path.isfile(target):
+            return self._send(404, {"error": "no such file"})
+        size = os.path.getsize(target)
+        ctype = self._CTYPES.get(os.path.splitext(target)[1].lower(),
+                                 "application/octet-stream")
+        start, end, code = 0, size - 1, 200
+        m = re.match(r"bytes=(\d*)-(\d*)", self.headers.get("Range", "") or "")
+        if m:
+            if m.group(1):
+                start = int(m.group(1))
+            if m.group(2):
+                end = min(int(m.group(2)), size - 1)
+            code = 206
+        length = max(end - start + 1, 0)
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(length))
+        if code == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        if self.command == "HEAD":
+            return
+        try:
+            with open(target, "rb") as f:
+                f.seek(start)
+                left = length
+                while left > 0:
+                    chunk = f.read(min(65536, left))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    left -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def _send_stream(self, video_id):
+        """Progressive play: tail-follow the growing cache file."""
+        if not re.fullmatch(r"[A-Za-z0-9_-]{6,20}", video_id or ""):
+            return self._send(400, {"error": "bad id"})
+        final, part = song_file(video_id), song_file(video_id) + ".part"
+        for _ in range(80):  # the download thread may need a few s to open the file
+            if os.path.exists(final) or os.path.exists(part):
+                break
+            if video_id not in _dl_state:
+                return self._send(404, {"error": "song not started"})
+            time.sleep(0.25)
+        path = final if os.path.exists(final) else part
+        if not os.path.exists(path):
+            return self._send(404, {"error": "no audio yet"})
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/mpeg")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.close_connection = True
+        try:
+            fd = os.open(path, os.O_RDONLY)
+            idle = 0
+            while True:
+                chunk = os.read(fd, 65536)
+                if chunk:
+                    idle = 0
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+                    continue
+                st = _dl_state.get(video_id)
+                if os.path.exists(final) and (st is None or st.get("done") or st.get("error")):
+                    break
+                idle += 1
+                if idle > 240:
+                    break
+                time.sleep(0.25)
+            os.close(fd)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+
     def _json_body(self):
         try:
             return json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
@@ -741,13 +1289,22 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path)
         if u.path == "/healthz":
-            return self._send(200, {"ok": True, "os": "JarvisOS 0.4.2"})
+            return self._send(200, {"ok": True, "os": "JarvisOS 0.5"})
         if u.path in ("/", "/face"):
             try:
                 with open(os.path.join(SHELL_DIR, "face.html"), "rb") as f:
                     return self._send(200, f.read(), "text/html")
             except Exception:
                 return self._send(500, {"error": "face missing"})
+        if u.path in ("/download", "/stream"):
+            # Media elements (<audio>, downloads) cannot send headers,
+            # so these two routes also accept the token as ?t=.
+            qs = parse_qs(u.query)
+            if not self._authed() and not (TOKEN and qs.get("t", [""])[0] == TOKEN):
+                return self._send(401, {"error": "bad or missing token"})
+            if u.path == "/download":
+                return self._send_file(qs.get("path", [""])[0])
+            return self._send_stream(qs.get("id", [""])[0])
         if not self._authed():
             return self._send(401, {"error": "bad or missing token"})
         if u.path == "/stats":
@@ -781,6 +1338,39 @@ class Handler(BaseHTTPRequestHandler):
                 items.append({"name": name, "dir": os.path.isdir(p),
                               "size": os.path.getsize(p) if os.path.isfile(p) else None})
             return self._send(200, {"path": rel, "items": items})
+        if u.path == "/music/search":
+            q = parse_qs(u.query).get("q", [""])[0]
+            if not q:
+                return self._send(400, {"error": "q required"})
+            try:
+                return self._send(200, {"results": yt_search(q)})
+            except Exception as e:
+                return self._send(502, {"error": str(e)[:200]})
+        if u.path == "/music/list":
+            idx = load_index()
+            songs = []
+            for vid, rec in idx["songs"].items():
+                st = _dl_state.get(vid)
+                songs.append({**rec, "cached": is_cached(vid),
+                              "state": "cached" if is_cached(vid) else
+                                       ("error" if st and st.get("error") else
+                                        "streaming" if st else "gone")})
+            songs.sort(key=lambda s: (not s["cached"], s.get("title", "")))
+            return self._send(200, {"songs": songs})
+        if u.path == "/music/status":
+            vid = parse_qs(u.query).get("id", [""])[0]
+            st = _dl_state.get(vid, {})
+            return self._send(200, {"videoId": vid, "cached": is_cached(vid),
+                                    "done": bool(st.get("done")), "bytes": st.get("bytes", 0),
+                                    "error": st.get("error")})
+        if u.path == "/music/lyrics":
+            qs = parse_qs(u.query)
+            song = {"videoId": qs.get("videoId", [""])[0],
+                    "title": qs.get("title", [""])[0],
+                    "artist": qs.get("artist", [""])[0],
+                    "duration": int(qs.get("duration", ["0"])[0] or 0)}
+            return self._send(200, {"lyrics": lyrics_for(song) if song["videoId"] else
+                                    fetch_lyrics(song["title"], song["artist"], song["duration"])})
         return self._send(404, {"error": "not found"})
 
     def do_POST(self):
@@ -812,6 +1402,11 @@ class Handler(BaseHTTPRequestHandler):
             if not req.get("kind"):
                 return self._send(400, {"error": "kind required: click|type|key|scroll"})
             return self._send(200, WATCH.input(req))
+        if self.path == "/music/play":
+            try:
+                return self._send(200, resolve_play(req))
+            except Exception as e:
+                return self._send(502, {"error": str(e)[:240]})
         if self.path == "/sync":
             with _sync_lock:
                 _git(["add", "-A"])
@@ -855,7 +1450,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     boot_sync()
-    print(f"JarvisOS 0.4.2 agent on :{PORT} workspace={WORKSPACE} token={'set' if TOKEN else 'UNSET'} "
+    print(f"JarvisOS 0.5 agent on :{PORT} workspace={WORKSPACE} token={'set' if TOKEN else 'UNSET'} "
           f"git={'on' if GIT_REPO else 'off'} cap={EXEC_CAP_MB}MB "
           f"watch={'moli' if shutil.which(MOLI_BIN) else 'unavailable'}", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
