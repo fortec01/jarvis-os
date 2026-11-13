@@ -103,6 +103,8 @@
   .libRow { cursor: pointer; }
   .libRow:hover { color: #ffc496; }
   @media (max-width: 640px) { .grid { grid-template-columns: repeat(2, 1fr); } .cols { grid-template-columns: 1fr; } #stage { min-height: 240px; } }
+  .tgt { border: 1px solid rgba(255,255,255,.35); background: transparent; color: #fff; border-radius: 999px; padding: 2px 10px; font-size: 12px; cursor: pointer; margin-right: 4px; }
+  .tgt.on { background: var(--glow1); border-color: transparent; font-weight: 700; }
 </style>
 </head>
 <body>
@@ -172,6 +174,7 @@
       <button style="border:none;border-radius:10px;padding:9px 16px;cursor:pointer;font-weight:700">find</button>
     </form>
     <div id="mStatus" style="font-size:13px;opacity:.85">He finds the song, matches the right version, and streams it here — words light up as they're sung, and the room glows with the album.</div>
+    <div style="font-size:12.5px;opacity:.9;margin-top:4px">this screen: <b id="devName" style="cursor:pointer;text-decoration:underline dotted" title="tap to rename this screen"></b> · send plays to: <span id="tgtChips"></span></div>
     <div id="mResults" style="margin-top:6px"></div>
     <div id="player" style="display:none">
       <div id="stage">
@@ -405,7 +408,7 @@
     e.preventDefault();
     const v = $('mQuery').value.trim(); if (!v) return;
     $('mResults').innerHTML = '';
-    if (/spotify\.com|youtube\.com|youtu\.be/.test(v)) { playReq({url: v}, 'finding your song…'); return; }
+    if (/spotify\.com|youtube\.com|youtu\.be/.test(v)) { routePlay({url: v}, 'finding your song…'); return; }
     $('mStatus').textContent = 'searching…';
     try {
       const r = await (await fetch('/music/search?q=' + encodeURIComponent(v), {headers: H})).json();
@@ -417,7 +420,7 @@
         '<div class="ra">' + esc(x.author) + '</div></div><div class="ra">' + fmtT(x.duration) + '</div><div>▶</div></div>').join('');
       document.querySelectorAll('#mResults .res').forEach(el =>
         el.addEventListener('click', () => { const x = r.results[+el.dataset.i];
-          playReq({videoId: x.videoId, title: x.title, artist: x.author, duration: x.duration, art: x.art}, 'starting…'); }));
+          routePlay({videoId: x.videoId, title: x.title, artist: x.author, duration: x.duration, art: x.art}, 'starting…'); }));
     } catch (err) { $('mStatus').textContent = 'search failed: ' + err; }
   });
 
@@ -428,6 +431,11 @@
       s = await (await fetch('/music/play', {method: 'POST', headers: H, body: JSON.stringify(body)})).json();
     } catch (err) { $('mStatus').textContent = 'could not start: ' + err; return; }
     if (s.error) { $('mStatus').textContent = 'hmm — ' + s.error; return; }
+    playPayload(s);
+  }
+  let pendingSong = null;
+  function playPayload(s) {
+    pendingSong = s;
     cur = s;
     const pl = $('player');
     if (pl.parentElement !== document.body) document.body.appendChild(pl); // .panel's backdrop-filter would trap position:fixed — the overlay must live at body level
@@ -446,7 +454,7 @@
     document.documentElement.style.setProperty('--glowTxt', pal[0]);
     setLyrics(s.lyrics);
     audio.src = mediaUrl(s.url);
-    audio.play().catch(() => {});
+    audio.play().catch(err => { if (err && err.name === 'NotAllowedError') { $('tapPlaySong').textContent = s.title || 'your song'; $('tapPlay').style.display = 'block'; } });
     setStateChip();
     if (statTimer) clearInterval(statTimer);
     if (s.state !== 'cached') {
@@ -471,6 +479,47 @@
       : 'playing — he caches every song, so the next play is instant';
     loadLib();
   }
+
+  // --- remote plays (v0.6): send a play to another screen, receive plays here ---
+  let devId = localStorage.getItem('jdev');
+  if (!devId) { devId = 'd' + Math.random().toString(36).slice(2, 10); localStorage.setItem('jdev', devId); }
+  let devName = localStorage.getItem('jdevname');
+  if (!devName) { const ua = navigator.userAgent; devName = /Android/i.test(ua) ? 'phone' : /Windows/i.test(ua) ? 'pc' : /Macintosh/i.test(ua) ? 'mac' : 'screen'; localStorage.setItem('jdevname', devName); }
+  let playTarget = 'self', lastDevs = [];
+  $('devName').textContent = devName;
+  $('devName').addEventListener('click', () => { const n = prompt('name this screen (phone, pc, tv…)', devName); if (n && n.trim()) { devName = n.trim().toLowerCase().slice(0, 24); localStorage.setItem('jdevname', devName); $('devName').textContent = devName; pollCmds(); } });
+
+  async function routePlay(body, note) {
+    if (playTarget === 'self') { playReq(body, note); return; }
+    $('mStatus').textContent = 'sending to ' + playTarget + '…';
+    try {
+      const r = await (await fetch('/command', {method: 'POST', headers: H, body: JSON.stringify({...body, target: playTarget, from: devName})})).json();
+      if (r.error) { $('mStatus').textContent = 'hmm — ' + r.error; return; }
+      $('mStatus').textContent = 'sent "' + (r.title || 'your song') + '" to ' + playTarget + ' ✓ — it starts playing there';
+    } catch (e) { $('mStatus').textContent = 'could not send: ' + e; }
+  }
+
+  function renderChips() {
+    let html = '<button type="button" class="tgt' + (playTarget === 'self' ? ' on' : '') + '" data-t="self">this screen</button>';
+    lastDevs.filter(d => d.id !== devId && d.ago_s < 90).forEach(d => {
+      html += '<button type="button" class="tgt' + (playTarget === d.label ? ' on' : '') + '" data-t="' + esc(d.label) + '">' + esc(d.label) + '</button>';
+    });
+    html += '<button type="button" class="tgt' + (playTarget === 'all' ? ' on' : '') + '" data-t="all">all screens</button>';
+    $('tgtChips').innerHTML = html;
+    document.querySelectorAll('#tgtChips .tgt').forEach(b => b.addEventListener('click', () => { playTarget = b.dataset.t; renderChips(); }));
+  }
+
+  async function pollCmds() {
+    try {
+      const r = await (await fetch('/commands?device=' + encodeURIComponent(devId) + '&label=' + encodeURIComponent(devName), {headers: H})).json();
+      lastDevs = r.devices || lastDevs; renderChips();
+      (r.commands || []).forEach(c => { if (c.action === 'play' && c.song) { playPayload(c.song); $('mStatus').textContent = 'playing — sent from ' + (c.from || 'another screen'); } });
+    } catch (e) {}
+  }
+  setInterval(pollCmds, 3000); pollCmds();
+
+  $('tapPlay').addEventListener('click', () => { $('tapPlay').style.display = 'none'; audio.play().catch(() => {}); });
+
   function setStateChip() {
     const cached = cur && cur.state === 'cached';
     $('mState').textContent = cached ? '⚡ cached — drag the bar anywhere' : 'streaming — caching as it plays…';
@@ -583,10 +632,11 @@
         ' <span style="opacity:.7">· ' + esc(s.artist || '') + '</span></li>').join('');
       document.querySelectorAll('#mLib .libRow').forEach(el =>
         el.addEventListener('click', () => { const s = r.songs[+el.dataset.i];
-          playReq({videoId: s.videoId, title: s.title, artist: s.artist, duration: s.duration, art: s.art}, 'starting…'); }));
+          routePlay({videoId: s.videoId, title: s.title, artist: s.artist, duration: s.duration, art: s.art}, 'starting…'); }));
     } catch (e) {}
   }
   loadLib();
 </script>
+  <div id="tapPlay" style="display:none;position:fixed;left:50%;transform:translateX(-50%);bottom:22px;z-index:70;background:var(--glow1,#ff7847);color:#fff;font-weight:800;font-size:15px;padding:13px 22px;border-radius:999px;cursor:pointer;box-shadow:0 8px 30px rgba(0,0,0,.5)">▶ tap to play — <span id="tapPlaySong">your song</span> was sent to this screen</div>
 </body>
 </html>
