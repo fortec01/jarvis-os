@@ -456,3 +456,43 @@ link lands on the right version.
   dep-dbrjmod6e07s73bu6da0; live-verified (face markers, /music/play returns
   the 640px art + vivid palette). Redeploy wiped the cache again — the song
   re-downloads on next plays (instance weather applies, as ever).
+
+### v0.6 — command plays: send a song to any screen (eres, 2026-11-14 ~00:28 IST)
+- **Question answered first:** playback never happens on the server (it has no
+  speaker) — the box finds/downloads/serves, and the song sounds on whichever
+  screen has the face open. v0.6 adds the missing "tell it" half: a command
+  channel, so a play can be COMMANDED from anywhere to any screen.
+- **Agent:** POST /command {query|url|videoId + hints, target, from} resolves
+  the song server-side ONCE (same resolve_play) and queues the full payload;
+  GET /commands?device=&label= heartbeats the device into a registry and
+  returns its commands exactly once; GET /devices lists screens. Targets:
+  a device label (phone / pc / …), a device id, or "all". In-memory, bounded
+  (20), stale commands expire in 10 min.
+- **Face:** every screen gets an id + a name (auto from user-agent —
+  Android → phone, Windows → pc — tap the name in the MUSIC panel to rename;
+  stored per browser). It polls /commands every 3 s. "send plays to" chips:
+  [this screen] + one per live screen + [all screens] — with a remote target
+  chosen, tapping a search result / library song / link SENDS it instead of
+  playing locally ("sent … ✓ — it starts playing there"). Received commands
+  open the full-screen player by themselves; if the browser's autoplay rule
+  blocks sound (no tap on that page yet), a "▶ tap to play — <song> was sent
+  to this screen" pill appears instead — one tap starts it.
+- **Also shipped just before (face key link):** the face accepts
+  /#t=<token> once to store its key — no console/popup needed (commit a879808).
+- **Local test (agent on :8902):** queue → poll delivers once → second poll
+  empty → no cross-delivery between labels. Face JS node --check OK.
+- **Live proof (cloud browser, real Chromium, twice):** a command queued from
+  OUTSIDE the browser (curl, from "eres, via Muse in chat") made the idle tab
+  open the full-screen player BY ITSELF within seconds — cover full-screen,
+  status "playing — sent from eres, via Muse in chat", screen registered as
+  "screen", chips showing [this screen] [all screens]. Delivery is exact-once
+  (a reload does not re-deliver). The sound itself never started IN THAT
+  BROWSER: autoplay was blocked (by design the tap-to-play pill appeared), and
+  the automation's clicks never landed on the overlay — the pill, which hides
+  unconditionally on a real click, never hid across repeated attempts on it
+  and on the play button, with the song fully cached. That is a limit of the
+  test browser's synthetic clicks, not of the channel: on a real device the
+  owner's first genuine tap unlocks that screen for the session (the same
+  mechanism Spotify Web's auto-advance relies on), after which commanded
+  plays start by themselves. Shot: test-out/music-remote-delivered.png.
+- Commits 5cedcc4 (agent) + 38c71c2 (face); deploy dep-dbrltm3l550s73crohjg.
