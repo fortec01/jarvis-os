@@ -225,3 +225,53 @@ At eres's direction ("bake Lightpanda + Scrapling's HTTP tier"):
 - Optional: snapshot backups to R2 (card on file) or B2 (no
   card) — her choice; external watchdog on the VPS stays
   parked with the rest of the A1/VPS track per her word.
+
+## v0.4 — YouTube data, media downloads, live watch (2026-11-13, LIVE)
+
+eres approved the full bundle: a `yt` data tool, a Cobalt
+downloader, Moli for a watchable live view, and a face with
+three new panels (WATCH HIM BROWSE / YOUTUBE / DOWNLOAD MEDIA).
+
+- **yt** (stdlib Python): search / info / transcript / channel
+  via the Invidious public API — instances auto-discovered
+  from api.invidious.io (api-enabled only), the one live
+  api-enabled instance today is yt.chocolatemoo53.com; channel
+  latest-uploads via RSS; oEmbed fallback for info.
+  Live-verified in-box: search returns ranked results with
+  channel/duration/views/ids; info shows 1.83B views + the
+  caption list; transcript returns clean lyric text (manual
+  English track preferred); channel resolves @RickAstleyYT →
+  subs + latest uploads.
+- **getmedia** (stdlib Python): downloads via public Cobalt
+  API instances (seed list + GETMEDIA_API override). The
+  instance fetches and tunnels the file, so it works from this
+  IP-walled box. Live-verified: the 28.5 MB 720p test video
+  saved into the workspace in **2.4s**. Supports --audio and
+  --quality; 300 MB cap.
+- **Moli 1.1.24** (Apache-2.0) rides the glibc sidecar like
+  Lightpanda (tarball sha256-verified at build, amd64). The
+  agent grew a watch layer: POST /watch starts
+  `moli serve --layout` on demand and relays CDP screencast
+  frames (JPEG, on change) — GET /watch.png serves the latest
+  frame, GET /watch the session status, POST /watch/stop ends
+  it; sessions auto-stop after 15 min without a viewer.
+  Live-verified in the real box: navigated a JavaScript page,
+  title read back ("Quotes to Scrape"), frames flowed, and
+  /watch.png returned the fully rendered page (screenshot:
+  test-out/watch-live-render.jpg). The face's watch panel
+  refreshes the frame every ~2.5s — on 0.1 CPU it reads as a
+  calm slideshow, as expected.
+- **v0.4.1 fix (same evening):** first live deploy's Moli
+  segfaulted on startup — it also links fontconfig / freetype /
+  expat / png / brotli, which bookworm-slim lacks, so the
+  loader fell back to Alpine's musl builds in /usr/lib (IFUNC
+  memmove clash, exit 139). Fix: the glibc-src stage installs
+  libbrotli1, libfontconfig1, libfreetype6, libexpat1 and
+  libpng16-16 so the Debian builds land in /opt/glibc/lib;
+  after it, the loader resolves **zero** Moli libraries
+  outside /opt/glibc and `moli --version` exits 0.
+  Commits: v0.4 = 0057f40…89bc615 (7 files), v0.4.1 = 5d300d0.
+- Known wart: /watch/stop (and re-navigation) can take a few
+  seconds to land — the session thread drains screencast
+  frames on a 5s socket timeout between commands. Harmless;
+  a shorter session-socket timeout is a v0.5 tidy-up.
