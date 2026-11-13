@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""JarvisOS agent core v0.4 — zero-dependency (Python stdlib only).
+"""JarvisOS agent core v0.4.2 — zero-dependency (Python stdlib only).
 
 Jarvis's whole computer in one small process:
   GET  /healthz      ok check (no auth)
@@ -16,15 +16,21 @@ Jarvis's whole computer in one small process:
   GET  /wallpaper.jpg, /face, /   the interactive face
   POST /sync         commit + push the workspace now
   POST /watch        {url} start Moli (visual browser) / navigate
-  GET  /watch        live-view session status
+  GET  /watch        live-view session status (+ viewport/frame)
   GET  /watch.png    latest screencast frame (JPEG)
   POST /watch/stop   stop the live-view session
+  POST /watch/input  {kind: click|type|key|scroll, ...} — eres
+                     takes the wheel: input forwarded into the
+                     page over the same CDP session
 
 v0.4 adds the watch layer: Moli (Apache-2.0, Rust headless
 browser with on-demand layout) runs `serve --layout` on demand;
 the agent drives it over CDP with a stdlib WebSocket client and
 relays its screencast frames (emitted on change) to the face.
 The session auto-stops after 15 min without a viewer.
+v0.4.2 adds take-control (the pattern open-source cockpit
+projects use: screencast out, CDP Input events back in) and
+shortens the session socket timeout so commands land faster.
 
 Workspace persistence: if JARVIS_GIT_REPO is set, the workspace is
 cloned/pulled at boot and auto-committed+pushed (debounced) after
@@ -358,6 +364,31 @@ class _WS:
             pass
 
 
+def _jpeg_size(data):
+    """(width, height) from a JPEG's SOF segment, or None."""
+    try:
+        i = 2
+        while i < len(data) - 9:
+            if data[i] != 0xFF:
+                i += 1
+                continue
+            marker = data[i + 1]
+            if marker in (0xC0, 0xC1, 0xC2):
+                h = (data[i + 5] << 8) | data[i + 6]
+                w = (data[i + 7] << 8) | data[i + 8]
+                return (w, h)
+            if marker == 0xD9 or 0xD0 <= marker <= 0xD8:
+                i += 2
+                continue
+            ln = (data[i + 2] << 8) | data[i + 3]
+            if ln < 2:
+                return None
+            i += 2 + ln
+    except Exception:
+        pass
+    return None
+
+
 class WatchSession:
     """One Moli serve process + CDP screencast, owned by one thread.
 
@@ -381,6 +412,8 @@ class WatchSession:
         self.last_access = 0.0
         self._mid = [0]
         self._cdp_session = None
+        self.viewport = None    # {"w":..,"h":..} CSS pixels of the page
+        self.frame_size = None  # (w, h) of the latest screencast JPEG
 
     # -- HTTP-side API ------------------------------------------------
     def _ensure_thread(self):
@@ -409,11 +442,26 @@ class WatchSession:
         self.cmds.put(("stop", None, None, None))
         return {"ok": True}
 
+    def input(self, spec):
+        """Forward one human input (click/type/key/scroll) to the page."""
+        if not self._ensure_thread():
+            return {"ok": False, "error": self.error}
+        done = threading.Event()
+        box = {}
+        self.cmds.put(("input", spec, done, box))
+        self.last_access = time.time()
+        if not done.wait(timeout=30):
+            return {"ok": False, "error": "input timed out"}
+        return box.get("result", {"ok": False, "error": "no result"})
+
     def status(self):
         self.last_access = time.time()
         return {"active": self.active, "url": self.url, "title": self.title,
                 "frames": self.frames,
                 "frame_age_s": round(time.time() - self.frame_ts, 1) if self.frame_ts else None,
+                "viewport": self.viewport,
+                "frame": ({"w": self.frame_size[0], "h": self.frame_size[1]}
+                          if self.frame_size else None),
                 "error": self.error}
 
     def latest_frame(self):
@@ -447,6 +495,7 @@ class WatchSession:
             wsurl = ver["webSocketDebuggerUrl"]
             path = wsurl[wsurl.index("/", wsurl.index("://") + 3):]
             ws = _WS("127.0.0.1", WATCH_PORT, path)
+            ws.s.settimeout(1.5)  # commands shouldn't wait on a 5s drain
 
             def call(method, params=None, sess=None, timeout=45):
                 mid[0] += 1
@@ -481,6 +530,7 @@ class WatchSession:
             with self.lock:
                 self.active = True
                 self.error = ""
+            self._read_viewport(call, session)
 
             while True:
                 try:
@@ -489,6 +539,18 @@ class WatchSession:
                     kind = None
                 if kind == "stop":
                     break
+                if kind == "input":
+                    try:
+                        self._do_input(call, session, arg)
+                        time.sleep(0.6)
+                        self._read_title_url(call, session)
+                        if box is not None:
+                            box["result"] = {"ok": True, "url": self.url, "title": self.title}
+                    except Exception as e:
+                        if box is not None:
+                            box["result"] = {"ok": False, "error": str(e)[:200]}
+                    if done:
+                        done.set()
                 if kind == "navigate":
                     try:
                         call("Page.navigate", {"url": arg}, sess=session)
@@ -553,9 +615,81 @@ class WatchSession:
                     except Exception:
                         pass
 
+    def _read_viewport(self, call, session):
+        try:
+            r = call("Runtime.evaluate",
+                     {"expression": "[window.innerWidth, window.innerHeight]",
+                      "returnByValue": True}, sess=session, timeout=10)
+            v = (r.get("result") or {}).get("value") or []
+            if len(v) == 2 and v[0]:
+                self.viewport = {"w": int(v[0]), "h": int(v[1])}
+        except Exception:
+            pass
+
+    def _read_title_url(self, call, session):
+        try:
+            r = call("Runtime.evaluate",
+                     {"expression": "[document.title, location.href]",
+                      "returnByValue": True}, sess=session, timeout=10)
+            v = (r.get("result") or {}).get("value") or []
+            if len(v) == 2:
+                if v[0]:
+                    self.title = v[0]
+                if v[1]:
+                    self.url = v[1]
+        except Exception:
+            pass
+
+    # key name -> (code, key, windows virtual key code)
+    _KEYMAP = {
+        "Enter": ("Enter", "Enter", 13), "Tab": ("Tab", "Tab", 9),
+        "Escape": ("Escape", "Escape", 27), "Backspace": ("Backspace", "Backspace", 8),
+        "Delete": ("Delete", "Delete", 46), " ": ("Space", " ", 32),
+        "ArrowUp": ("ArrowUp", "ArrowUp", 38), "ArrowDown": ("ArrowDown", "ArrowDown", 40),
+        "ArrowLeft": ("ArrowLeft", "ArrowLeft", 37), "ArrowRight": ("ArrowRight", "ArrowRight", 39),
+    }
+
+    def _do_input(self, call, session, spec):
+        """Translate one face input into CDP Input calls (viewport coords)."""
+        kind = (spec or {}).get("kind")
+        if kind == "click":
+            x, y = float(spec["x"]), float(spec["y"])
+            call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y}, sess=session)
+            call("Input.dispatchMouseEvent",
+                 {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1},
+                 sess=session)
+            call("Input.dispatchMouseEvent",
+                 {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1},
+                 sess=session)
+        elif kind == "type":
+            text = str(spec.get("text", ""))[:2000]
+            if text:
+                call("Input.insertText", {"text": text}, sess=session)
+        elif kind == "key":
+            k = str(spec.get("key", ""))
+            code, keyname, vkey = self._KEYMAP.get(k, (k, k, 0))
+            ev = {"key": keyname, "code": code}
+            if vkey:
+                ev["windowsVirtualKeyCode"] = vkey
+                ev["nativeVirtualKeyCode"] = vkey
+            if len(k) == 1:
+                ev["text"] = k
+            call("Input.dispatchKeyEvent", dict(ev, type="keyDown"), sess=session)
+            call("Input.dispatchKeyEvent", dict(ev, type="keyUp"), sess=session)
+        elif kind == "scroll":
+            dy = int(spec.get("dy", 600))
+            call("Runtime.evaluate",
+                 {"expression": f"window.scrollBy(0, {dy})", "returnByValue": True},
+                 sess=session)
+        else:
+            raise RuntimeError("unknown input kind: " + str(kind))
+
     def _on_frame(self, ws, params):
         try:
             self.frame = base64.b64decode(params.get("data", ""))
+            size = _jpeg_size(self.frame)
+            if size:
+                self.frame_size = size
             self.frame_ts = time.time()
             self.frames += 1
             self._mid[0] += 1
@@ -573,7 +707,7 @@ WATCH = WatchSession()
 
 # ---------------------------------------------------------------- http
 class Handler(BaseHTTPRequestHandler):
-    server_version = "JarvisOS/0.4"
+    server_version = "JarvisOS/0.4.2"
 
     def log_message(self, *args):
         pass
@@ -607,7 +741,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path)
         if u.path == "/healthz":
-            return self._send(200, {"ok": True, "os": "JarvisOS 0.4"})
+            return self._send(200, {"ok": True, "os": "JarvisOS 0.4.2"})
         if u.path in ("/", "/face"):
             try:
                 with open(os.path.join(SHELL_DIR, "face.html"), "rb") as f:
@@ -674,6 +808,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, WATCH.navigate(url))
         if self.path == "/watch/stop":
             return self._send(200, WATCH.stop())
+        if self.path == "/watch/input":
+            if not req.get("kind"):
+                return self._send(400, {"error": "kind required: click|type|key|scroll"})
+            return self._send(200, WATCH.input(req))
         if self.path == "/sync":
             with _sync_lock:
                 _git(["add", "-A"])
@@ -717,7 +855,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     boot_sync()
-    print(f"JarvisOS 0.4 agent on :{PORT} workspace={WORKSPACE} token={'set' if TOKEN else 'UNSET'} "
+    print(f"JarvisOS 0.4.2 agent on :{PORT} workspace={WORKSPACE} token={'set' if TOKEN else 'UNSET'} "
           f"git={'on' if GIT_REPO else 'off'} cap={EXEC_CAP_MB}MB "
           f"watch={'moli' if shutil.which(MOLI_BIN) else 'unavailable'}", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
