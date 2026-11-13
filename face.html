@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JarvisOS — his computer</title>
+<style>
+  * { box-sizing: border-box; font-family: system-ui, "Segoe UI", sans-serif; }
+  body { margin: 0; min-height: 100vh; color: #fff;
+         background: #2b124a url('/wallpaper.jpg') center/cover fixed no-repeat; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 26px 18px 60px; }
+  .trio { display: flex; gap: 14px; justify-content: center; align-items: center; }
+  .circ { width: 74px; height: 74px; border-radius: 50%; display: flex; flex-direction: column;
+          align-items: center; justify-content: center; font-weight: 700;
+          background: rgba(26,12,38,.45); border: 2px solid rgba(255,255,255,.55); }
+  .circ small { font-weight: 400; font-size: 10px; opacity: .85; }
+  .olive { background: rgba(96,92,40,.85); border: none; }
+  .clock { margin: 18px auto 6px; width: 250px; height: 250px; background: #e0483a;
+           border-radius: 46% 54% 52% 48% / 48% 46% 54% 52%;
+           display: flex; flex-direction: column; align-items: center; justify-content: center;
+           box-shadow: 0 18px 50px rgba(0,0,0,.35); }
+  .clock .t { font-size: 62px; font-weight: 800; line-height: 1; }
+  .clock .d { margin-top: 8px; opacity: .92; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 22px; }
+  .card { background: rgba(26,12,38,.72); border-radius: 22px; padding: 14px 18px; backdrop-filter: blur(4px); }
+  .card .lab { color: #ffc496; font-weight: 700; font-size: 13px; letter-spacing: .06em; }
+  .card .val { font-size: 32px; font-weight: 800; margin-top: 4px; }
+  .card .bar { height: 7px; border-radius: 4px; background: rgba(255,255,255,.25); margin-top: 8px; }
+  .card .bar i { display: block; height: 100%; border-radius: 4px; background: #ffaa5a; width: 0%; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
+  .panel { background: rgba(26,12,38,.72); border-radius: 22px; padding: 16px 18px; backdrop-filter: blur(4px); }
+  .panel h3 { margin: 0 0 10px; font-size: 15px; color: #ffc496; letter-spacing: .05em; }
+  .panel ul { margin: 0; padding: 0; list-style: none; font-size: 14px; }
+  .panel li { padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,.09); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .panel li:last-child { border-bottom: none; }
+  .st-done { color: #8dffb0; } .st-doing { color: #ffd76a; } .st-pending { opacity: .75; }
+  .ask { margin: 16px auto 0; max-width: 640px; display: flex; gap: 8px;
+         background: rgba(26,12,38,.8); border-radius: 999px; padding: 7px 7px 7px 20px; }
+  .ask input { flex: 1; background: none; border: none; outline: none; color: #fff; font-size: 15px; }
+  .ask button { border: none; border-radius: 999px; width: 40px; height: 40px; font-size: 17px; cursor: pointer; }
+  pre.out { max-width: 640px; margin: 10px auto 0; background: rgba(10,5,18,.85); border-radius: 14px;
+            padding: 12px 16px; font-size: 13px; white-space: pre-wrap; display: none; }
+  .foot { text-align: center; opacity: .8; margin-top: 22px; font-size: 13px; }
+  @media (max-width: 640px) { .grid { grid-template-columns: repeat(2, 1fr); } .cols { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="trio">
+    <div class="circ olive"><span>☁</span><span>4°</span></div>
+    <div class="circ"><span style="font-size:26px">J</span></div>
+    <div class="circ"><span id="upRing">–</span><small>awake</small></div>
+  </div>
+
+  <div class="clock"><div class="t" id="clock">--:--</div><div class="d" id="date"></div></div>
+
+  <form class="ask" id="askForm">
+    <input id="askInput" placeholder="✦  ask jarvis anything… (runs on his computer)" autocomplete="off">
+    <button title="run">→</button>
+  </form>
+  <pre class="out" id="out"></pre>
+
+  <div class="grid">
+    <div class="card"><div class="lab">CPU</div><div class="val" id="cpu">–</div><div class="bar"><i id="cpuBar"></i></div></div>
+    <div class="card"><div class="lab">RAM</div><div class="val" id="ram">–</div><div class="bar"><i id="ramBar"></i></div></div>
+    <div class="card"><div class="lab">GPU</div><div class="val">—</div><div style="font-size:12px;opacity:.7;margin-top:8px">n/a on this server</div></div>
+    <div class="card"><div class="lab">TEMP</div><div class="val">—</div><div style="font-size:12px;opacity:.7;margin-top:8px">n/a on this server</div></div>
+    <div class="card"><div class="lab">DISK</div><div class="val" id="disk">–</div><div class="bar"><i id="diskBar"></i></div></div>
+    <div class="card"><div class="lab">NET</div><div class="val" id="net">–</div><div style="font-size:12px;opacity:.7;margin-top:8px">live</div></div>
+  </div>
+
+  <div class="cols">
+    <div class="panel"><h3>WORKSPACE</h3><ul id="files"><li>…</li></ul></div>
+    <div class="panel"><h3>TASKS</h3><ul id="tasks"><li>…</li></ul></div>
+  </div>
+
+  <div class="foot">JARVIS OS · his own computer · <span id="load"></span></div>
+</div>
+<script>
+  let tok = localStorage.getItem('jtok');
+  if (!tok) { tok = prompt('JarvisOS token:') || ''; localStorage.setItem('jtok', tok); }
+  const H = { 'X-Jarvis-Token': tok, 'Content-Type': 'application/json' };
+  const $ = id => document.getElementById(id);
+  function tickClock() {
+    const n = new Date();
+    $('clock').textContent = n.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hour12: false});
+    $('date').textContent = n.toLocaleDateString([], {weekday: 'short', month: 'short', day: 'numeric'});
+  }
+  tickClock(); setInterval(tickClock, 10000);
+  async function refresh() {
+    try {
+      const s = await (await fetch('/stats', {headers: H})).json();
+      $('cpu').textContent = Math.round(s.cpu_pct) + '%'; $('cpuBar').style.width = s.cpu_pct + '%';
+      $('ram').textContent = (s.mem_used_mb / 1024).toFixed(1) + 'G'; $('ramBar').style.width = s.mem_pct + '%';
+      $('disk').textContent = Math.round(s.disk_used_pct) + '%'; $('diskBar').style.width = s.disk_used_pct + '%';
+      $('net').textContent = Math.round(s.net_kbps) + 'K/s';
+      $('upRing').textContent = s.uptime_min < 1440 ? (s.uptime_min / 60).toFixed(1) + 'h' : Math.floor(s.uptime_min / 1440) + 'd';
+      $('load').textContent = 'load ' + s.load1;
+      const f = await (await fetch('/files', {headers: H})).json();
+      $('files').innerHTML = f.items.slice(0, 12).map(i => '<li>' + (i.dir ? '📁 ' : '📄 ') + i.name + '</li>').join('') || '<li>(empty)</li>';
+      const t = await (await fetch('/tasks', {headers: H})).json();
+      $('tasks').innerHTML = t.tasks.slice(-6).reverse().map(x =>
+        '<li><b>' + x.title + '</b> · ' + x.status + x.steps.map((st, i) =>
+          '<br><span class="st-' + st.status + '">' + (st.status === 'done' ? '✓' : st.status === 'doing' ? '●' : '○') + ' ' + st.text + '</span>').join('') + '</li>'
+      ).join('') || '<li>no tasks yet</li>';
+    } catch (e) { /* next tick retries */ }
+  }
+  refresh(); setInterval(refresh, 5000);
+  $('askForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const cmd = $('askInput').value.trim(); if (!cmd) return;
+    $('askInput').value = '';
+    const out = $('out'); out.style.display = 'block'; out.textContent = 'running…';
+    const r = await (await fetch('/exec', {method: 'POST', headers: H, body: JSON.stringify({cmd, timeout: 60})})).json();
+    out.textContent = (r.stdout || '') + (r.stderr || '') + '\n[exit ' + r.code + (r.killed ? ' · ' + r.killed : '') + ' · ' + r.secs + 's · sandbox: ' + r.sandbox + ']';
+    refresh();
+  });
+</script>
+</body>
+</html>

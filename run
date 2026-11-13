@@ -1,0 +1,5 @@
+#!/command/with-contenv sh
+# JarvisOS agent, supervised by s6-overlay (PID 1 = /init).
+# If this process dies, s6 restarts it — the OS heals itself.
+# Runs as the unprivileged 'jarvis' user.
+exec s6-setuidgid jarvis python3 /opt/jarvisos/agent/agent.py
