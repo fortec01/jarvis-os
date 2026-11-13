@@ -833,7 +833,7 @@ def _ratio(a, b):
 
 
 def clean_title(title):
-    t = re.sub(r"\s*[\(\[][^\]\)]*(official|video|audio|lyric|lyrics|mv|hd|4k|visualizer)[^\]\)]*[\)\]]",
+    t = re.sub(r"\s*[\(\[][^\)\]]*(official|video|audio|lyric|lyrics|mv|hd|4k|visualizer)[^\)\]]*[\)\]]",
                "", title or "", flags=re.I)
     t = re.sub(r"\s+", " ", t).strip(" -|")
     return t or (title or "")
@@ -987,15 +987,22 @@ def _fetch_audio(video_id, part):
             req = urllib.request.Request(src)
             req.add_header("User-Agent", UA)
             total = 0
-            with urllib.request.urlopen(req, timeout=60) as r, open(part, "wb") as f:
+            t0 = time.time()
+            # A tunnel can also fail by DRIPPING (seen live: one
+            # chunk, then a stall) — the 25s socket timeout trips
+            # on a dead tunnel and the 150s deadline on a hopeless
+            # drip; either way the next instance gets its turn.
+            with urllib.request.urlopen(req, timeout=25) as r, open(part, "wb") as f:
                 while True:
-                    chunk = r.read(65536)
+                    chunk = r.read(16384)  # small reads: the deadline gets checked often
                     if not chunk:
                         break
                     f.write(chunk)
                     total += len(chunk)
                     if total > 60 * 1024 * 1024:
                         raise RuntimeError("file too large for a song")
+                    if time.time() - t0 > 150:
+                        raise RuntimeError(f"tunnel via {api} too slow ({total} bytes in 150s)")
             if total < 20000:
                 raise RuntimeError(f"tunnel via {api} delivered only {total} bytes")
             return total
