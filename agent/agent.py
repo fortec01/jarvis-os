@@ -880,6 +880,12 @@ def best_match(song, candidates):
     return scored[0] if scored else (None, None, None)
 
 
+def hi_art(url):
+    """Spotify's CDN serves the same cover at 640px under a different
+    size prefix — swap it in so the full-screen stage stays sharp."""
+    return (url or "").replace("ab67616d00001e02", "ab67616d0000b273")
+
+
 def spotify_meta(url):
     """Track metadata from Spotify's public embed/oEmbed — no login."""
     m = re.search(r"/track/([A-Za-z0-9]+)", url)
@@ -1240,7 +1246,7 @@ def resolve_play(req):
                 rec["palette"] = pal
     return {"videoId": video_id, "title": rec.get("title", song["title"]),
             "artist": rec.get("artist", ""), "duration": rec.get("duration", 0),
-            "art": rec.get("art", ""), "palette": rec.get("palette"),
+            "art": hi_art(rec.get("art", "")), "palette": rec.get("palette"),
             "state": state,
             "url": ("/download?path=" + quote("music/" + video_id + ".mp3")
                     if state == "cached" else f"/stream?id={video_id}"),
