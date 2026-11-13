@@ -192,18 +192,7 @@ def tree_rss_mb(root_pid):
     return total
 
 
-def run_exec(cmd, timeout, sandbox_mode):
-    argv = ["/bin/sh", "-c", cmd]
-    sandbox = "off"
-    if sandbox_mode != "off" and shutil.which("bwrap"):
-        argv = ["bwrap", "--ro-bind", "/", "/", "--bind", WORKSPACE, WORKSPACE,
-                "--dev", "/dev", "--proc", "/proc", "--chdir", WORKSPACE]
-        if sandbox_mode == "nonet":
-            argv.append("--unshare-net")
-        argv += ["--", "/bin/sh", "-c", cmd]
-        sandbox = "bwrap" + ("+nonet" if sandbox_mode == "nonet" else "")
-    elif sandbox_mode != "off":
-        sandbox = "unavailable-fallback"
+def _run_once(argv, timeout):
     p = subprocess.Popen(argv, cwd=WORKSPACE, stdout=subprocess.PIPE,
                          stderr=subprocess.PIPE, text=True, start_new_session=True)
     killed = {"why": None}
@@ -231,8 +220,30 @@ def run_exec(cmd, timeout, sandbox_mode):
             pass
         out, err = p.communicate()
         code, killed["why"] = -1, f"timeout {timeout}s"
-    return {"code": code, "stdout": (out or "")[-65536:], "stderr": (err or "")[-16384:],
-            "sandbox": sandbox, "killed": killed["why"]}
+    return code, (out or "")[-65536:], (err or "")[-16384:], killed["why"]
+
+
+def run_exec(cmd, timeout, sandbox_mode):
+    plain = ["/bin/sh", "-c", cmd]
+    argv = plain
+    sandbox = "off"
+    if sandbox_mode != "off" and shutil.which("bwrap"):
+        argv = ["bwrap", "--ro-bind", "/", "/", "--bind", WORKSPACE, WORKSPACE,
+                "--dev", "/dev", "--proc", "/proc", "--chdir", WORKSPACE]
+        if sandbox_mode == "nonet":
+            argv.append("--unshare-net")
+        argv += ["--", "/bin/sh", "-c", cmd]
+        sandbox = "bwrap" + ("+nonet" if sandbox_mode == "nonet" else "")
+    elif sandbox_mode != "off":
+        sandbox = "unavailable-fallback"
+    code, out, err, killed = _run_once(argv, timeout)
+    if sandbox.startswith("bwrap") and code != 0 and "bwrap:" in err:
+        # The host forbids bwrap's mount operations (Render does) —
+        # heal by running unsandboxed instead of failing every job.
+        code, out, err, killed = _run_once(plain, timeout)
+        sandbox = "bwrap-unavailable-fallback"
+    return {"code": code, "stdout": out, "stderr": err,
+            "sandbox": sandbox, "killed": killed}
 
 
 # ---------------------------------------------------------------- tasks
