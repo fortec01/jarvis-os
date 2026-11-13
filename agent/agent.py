@@ -279,7 +279,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     def _authed(self):
         return bool(TOKEN) and self.headers.get("X-Jarvis-Token") == TOKEN
@@ -289,6 +290,11 @@ class Handler(BaseHTTPRequestHandler):
             return json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
         except Exception:
             return None
+
+    def do_HEAD(self):
+        # Uptime monitors (e.g. UptimeRobot) check with HEAD; route
+        # exactly like GET — _send keeps the headers, drops the body.
+        self.do_GET()
 
     def do_GET(self):
         u = urlparse(self.path)
