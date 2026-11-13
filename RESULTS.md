@@ -299,3 +299,109 @@ three new panels (WATCH HIM BROWSE / YOUTUBE / DOWNLOAD MEDIA).
   (test-out/watch-takecontrol-live.jpg).
   Commits 18ae0b9 (agent) + 2192717 (face); deploy
   dep-dbrgb2tbedkc73dhhbc0.
+
+## v0.5 — the music release (eres, 2026-11-13, LIVE)
+Ask: "create a perfect one to enjoy music" — streaming music
+in the face, built from the open-source ideas researched the
+same evening (Verci's word-by-word lyrics, Lumn's album-art
+glow, Lyric's web architecture) on the pipeline already proven
+on this box (Invidious catalogue + Cobalt audio), with the
+SpotDL matcher reversed at source level so a pasted Spotify
+link lands on the right version.
+
+- Agent (stdlib only; Pillow only for the palette):
+  POST /music/play {query | Spotify/YouTube url | videoId} —
+  Spotify metadata comes from the public embed page's
+  __NEXT_DATA__ JSON (title, artists, exact duration) + oEmbed
+  art; the matcher scores YouTube candidates SpotDL-style
+  (fuzzy title/artist, exp(−0.1·Δs) duration curve, forbidden-
+  words penalty, official-audio/topic bonuses). Songs stream
+  progressively via GET /stream (tail-follows the growing
+  cache file) while a background thread caches the MP3 into
+  workspace/music/; replays come from GET /download, which
+  gained full HTTP Range support (206, suffix/open ranges) —
+  also wired into the face's workspace list as ⬇ save links,
+  closing the long-standing "no way to get a file off his
+  computer" gap. GET /music/search|list|status|lyrics round it
+  out; lyrics come from LRCLIB (line-synced) and the glow
+  palette is extracted from the album art and cached.
+- Face: MUSIC — PLAY ANYTHING panel. One box: type a song
+  (search results with thumbs/durations) or paste a Spotify /
+  YouTube link (plays directly). The stage shows blurred
+  album art behind prev/current/next lyric lines; the current
+  line's words light one by one in the album colour (word
+  timing interpolated across the line by word length, the
+  LRCLIB-based approach); "all the words" expands the full
+  synced lyrics (tap a line to seek once cached). A fixed
+  frame around the whole face glows in the album's two
+  palette colours, pulsing with the song's own bass (WebAudio
+  FFT on the audio element — no microphone, same trick as
+  the open-source Lyric). Seek unlocks once the song is
+  cached; the face swaps the stream for the seekable file
+  mid-play without losing position. Library list below
+  replays anything he has cached.
+- Honest shape: first play of a song streams unseekably
+  (Cobalt tunnels ignore Range) and starts in ~2–3 s; once
+  cached it's instant with full seek. The cache lives on the
+  disposable disk — it wipes on spin-down until workspace
+  git persistence is wired (still eres-gated).
+- **v0.5.1 fixes (same evening, found by live testing):**
+  (1) Image toolkit added at eres's ask — Node v22.23.5 +
+  npm 11.6.4, uv 0.7.22, bash 5.2.37, ffmpeg/ffprobe 6.1.2,
+  jq 1.8.2, ripgrep 14.1.1, sqlite 3.49.2, OpenSSH 10.0
+  (all Alpine packages, versions verified in-box; ~130 MB
+  disk, nothing new resident). Deliberately excluded as too
+  heavy: Bun, Deno, C toolchain, Chromium.
+  (2) The first live Spotify play picked a *lyrics upload*
+  (7clouds) over the Official Audio by 0.6 points — the
+  matcher now penalises lyrics/lyric/nightcore/sped uploads
+  and credits an artist name found only in a title at 60
+  instead of 90; re-tested against the live candidate set,
+  the Official Audio wins 77.2 vs 63.5.
+  (3) That same play's download died with an empty tunnel
+  body from the first Cobalt instance; the fetcher now
+  fails over across instances, counting an attempt only
+  when ≥20 KB actually land.
+  (4) Stall handling, two rounds: a tunnel was then seen
+  delivering one 64 KB burst and stalling for minutes, so
+  reads went small (16 KB) with a 25 s socket timeout (a
+  dead tunnel now trips fast) — but the first version's
+  150 s total deadline killed a healthy ~20 KB/s fetch at
+  ~80% (2.59 MB of 3.25 MB), so the deadline became a
+  900 s safety net: slow-but-alive tunnels may finish.
+  Commits: v0.5 = ceccf48 (agent) + 274f2f1 (face);
+  v0.5.1 = 4ab46a4 (Dockerfile toolkit) + bec6630
+  (failover + matcher) + bcd9ecf (stall detection) +
+  4110634 (deadline 900 s). Deploys: dep-dbrh7p9srm7s73925ra0
+  (v0.5 + toolkit), dep-dbrhd9mc6qcc73du114g (bec6630),
+  dep-dbrhg5tg1s2s738h11eg (bcd9ecf), dep-dbrhj556e07s73bo6700
+  (4110634, current live).
+  FINAL LIVE VERIFICATION (2026-11-13 evening, fixed build):
+  healthz = JarvisOS 0.5; Spotify-link play → correct pick
+  fHI8X4OXluQ "Blinding Lights" Official Audio, artist
+  "The Weeknd" (matcher 77.2, artist 100.0), synced lyrics
+  40 lines, palette from the real album art — every leg of
+  his own pipeline verified live, repeatedly. The third-
+  party leg made the evening long: the free community
+  Cobalt instance degraded hour by hour (2.4 s full pull at
+  v0.4 → 25–49 s pulls → ~20 KB/s steady → one-burst
+  stalls → repeated 502 Bad Gateway on ALL seed instances
+  → a ~4 KB/s crawl), and the failover machinery earned
+  its keep throughout (each empty/502 attempt detected,
+  the next instance tried, errors reported honestly
+  instead of hanging). And then the crawl WON: the slowest
+  fetch simply kept going under the 900 s safety net and
+  finished — a repeat play returned state "cached", and
+  the full end-to-end proof set closed on the real box:
+  status cached=true, 3,252,222 bytes; ffprobe duration
+  203.256 s; ID3 header present; live Range request
+  bytes=1000-1999 → HTTP 206, Accept-Ranges: bytes,
+  Content-Range 1000-1999/3252222, exactly 1,000 payload
+  bytes; an in-box /stream probe delivered all 3,252,222
+  bytes with the ID3 head. Search → resolve → stream →
+  cache → seek is therefore verified end-to-end, live.
+  Practical shape for eres: first-play speed is instance
+  weather (seconds on a good hour, minutes on a bad one;
+  one tap retries a 502); a landed song replays instantly
+  with full seek until the next spin-down wipes the
+  disposable disk.
