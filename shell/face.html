@@ -237,6 +237,8 @@
   <div class="foot">JARVIS OS · his own computer · <span id="load"></span></div>
 </div>
 <script>
+  const _h = new URLSearchParams(location.hash.slice(1)); // one-time link: /#t=<token> stores the key, then cleans the URL
+  if (_h.get('t')) { localStorage.setItem('jtok', _h.get('t')); history.replaceState(null, '', location.pathname + location.search); }
   let tok = localStorage.getItem('jtok');
   if (!tok) { tok = prompt('JarvisOS token:') || ''; localStorage.setItem('jtok', tok); }
   const H = { 'X-Jarvis-Token': tok, 'Content-Type': 'application/json' };
