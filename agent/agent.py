@@ -1179,6 +1179,55 @@ def lyrics_for(song):
     return lyr
 
 
+# --- remote play commands (v0.6) -------------------------------------------
+# Any face (or eres, via Muse) can queue a play for another screen: the song
+# is resolved HERE, once, and the receiving screen just plays the payload.
+# Commands and the device registry are ephemeral (in-memory) on purpose.
+_cmd_lock = threading.Lock()
+_cmd_queue = []            # pending commands, oldest first
+_devices = {}              # device id -> {"label": str, "last": epoch}
+
+
+def queue_command(req):
+    song = resolve_play({k: req.get(k) for k in
+                         ("query", "url", "videoId", "title", "artist",
+                          "duration", "art") if req.get(k) is not None})
+    cmd = {"id": f"c{int(time.time() * 1000)}", "action": "play",
+           "target": str(req.get("target") or "all"),
+           "from": str(req.get("from") or "a screen"),
+           "song": song, "ts": int(time.time())}
+    with _cmd_lock:
+        _cmd_queue.append(cmd)
+        del _cmd_queue[:-20]               # bounded, always
+    return {"ok": True, "queued": cmd["id"], "target": cmd["target"],
+            "title": song.get("title"), "artist": song.get("artist")}
+
+
+def poll_commands(device_id, label):
+    """Heartbeat a device and hand it the commands aimed at it (once)."""
+    now = int(time.time())
+    with _cmd_lock:
+        if device_id:
+            _devices[device_id] = {"label": label or device_id, "last": now}
+        mine, rest = [], []
+        for c in _cmd_queue:
+            t = c["target"]
+            if t in ("all", device_id) or (label and t == label):
+                mine.append(c)
+            else:
+                rest.append(c)
+        _cmd_queue[:] = [c for c in rest if now - c["ts"] < 600]
+        return mine[-5:]
+
+
+def list_devices():
+    now = int(time.time())
+    with _cmd_lock:
+        return [{"id": d, "label": v["label"], "ago_s": now - v["last"]}
+                for d, v in sorted(_devices.items(),
+                                    key=lambda kv: kv[1]["label"].lower())]
+
+
 def resolve_play(req):
     """Turn {query|url|videoId} into a playable song record."""
     url = (req.get("url") or "").strip()
@@ -1454,6 +1503,13 @@ class Handler(BaseHTTPRequestHandler):
                     "duration": int(qs.get("duration", ["0"])[0] or 0)}
             return self._send(200, {"lyrics": lyrics_for(song) if song["videoId"] else
                                     fetch_lyrics(song["title"], song["artist"], song["duration"])})
+        if u.path == "/commands":
+            qs = parse_qs(u.query)
+            cmds = poll_commands(qs.get("device", [""])[0],
+                                 qs.get("label", [""])[0])
+            return self._send(200, {"commands": cmds, "devices": list_devices()})
+        if u.path == "/devices":
+            return self._send(200, {"devices": list_devices()})
         return self._send(404, {"error": "not found"})
 
     def do_POST(self):
@@ -1488,6 +1544,11 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/music/play":
             try:
                 return self._send(200, resolve_play(req))
+            except Exception as e:
+                return self._send(502, {"error": str(e)[:240]})
+        if self.path == "/command":
+            try:
+                return self._send(200, queue_command(req))
             except Exception as e:
                 return self._send(502, {"error": str(e)[:240]})
         if self.path == "/sync":
