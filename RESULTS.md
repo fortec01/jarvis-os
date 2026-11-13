@@ -405,3 +405,28 @@ link lands on the right version.
   one tap retries a 502); a landed song replays instantly
   with full seek until the next spin-down wipes the
   disposable disk.
+
+### v0.5.2 — Verci-style player + vibrant palette (same evening, eres's correction: "that looks so bad… use this and image at back for songs")
+- **Face redesign (face.html only):** the stage is now the reference look — the song's
+  art **full-bleed and vivid** (blur/dark veil removed; soft edge shade only),
+  lyrics **giant** (900-weight italic, clamp 36–80px) stacked prev/current/next
+  over the art; sung words light up white word by word, unsung stay translucent,
+  and the **word being sung sits in a solid block of the album's lead colour**
+  (Verci's block highlight); the edge rim went full Lumn (four inset shadows,
+  stronger bass-reactive targets). Commits 04b5284 (agent) + d7faff0 (face),
+  deploy dep-dbri69d9fdbs73efhth0.
+- **Palette picker rewritten (agent):** by-area quantize picked mud (hair and
+  backdrop win on pixels). Now: 16-swatch quantize → lead = most vivid prominent
+  swatch by area×saturation, second = dominant non-twin → each keeps its hue but
+  is **lifted to glow strength** in HLS (lead sat ≥0.72 / L 0.52; second ≥0.45 /
+  L 0.58; monochrome art stays neutral). `PALETTE_VER = 2` — cached songs
+  recompute once on next play. Live proof, Blinding Lights (After Hours cover):
+  **['#46371c', '#9eb6a4'] → ['#dd762c', '#64c474']** (amber + mint), returned by
+  the production /music/play itself; song re-cached (3,252,222 bytes), lyrics
+  synced, Range/stream verified in the rounds before.
+- **Capture caveat (test rig, not the product):** the sandbox screenshot engine
+  (Moli layout paint) decodes images (naturalWidth 300 via data-URI) but does
+  not rasterize JPEGs into screenshots — via CDN URL, via local proxy, as
+  <img>, with filters cleared, and as a CSS background, all five routes paint
+  nothing. The face's art is a plain <img> on a public CDN (the agent fetches
+  the same file fine for palettes); it renders normally in a real browser.
