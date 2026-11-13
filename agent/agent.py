@@ -1052,28 +1052,71 @@ def ensure_download(video_id):
     return "streaming"
 
 
+PALETTE_VER = 2  # bump when the picker changes; cached palettes recompute
+
+
 def palette_for(art_url, video_id):
-    """Two glow colours from the album art (Pillow, cached in index)."""
+    """Two glow colours from the album art (Pillow, cached in index).
+
+    Vibrant-style picking: a plain by-area palette is mud (hair and
+    backdrop win on pixels while the poster's red sits in a corner),
+    so the lead colour is the most vivid prominent swatch and the
+    second is the dominant area colour that is not its near-twin.
+    Raw cover swatches are usually shadow-toned, so each pick keeps
+    its hue but is lifted to glow strength (saturation/lightness
+    floors) — the rim and the lyric block need neon, not mud.
+    """
     if not art_url:
         return None
     try:
+        import colorsys
         import io
         from PIL import Image
         _, data = _http(art_url, timeout=12)
         im = Image.open(io.BytesIO(data[:800_000])).convert("RGB")
         im.thumbnail((96, 96))
-        q = im.quantize(colors=6)
-        pal, counts = q.getpalette(), sorted(q.getcolors() or [], reverse=True)
-        cols = []
-        for _, ci in counts:
+        q = im.quantize(colors=16)
+        pal = q.getpalette()
+        counts = q.getcolors() or []
+        total = sum(c for c, _ in counts) or 1
+        entries = []
+        for cnt, ci in counts:
             r, g, b = pal[ci * 3:ci * 3 + 3]
             mx, mn = max(r, g, b), min(r, g, b)
-            if mx < 28 or (mx - mn) < 18 and len(cols) == 0 and len(counts) > 1:
-                continue  # skip muddy near-black/grey as the lead colour
-            cols.append("#%02x%02x%02x" % (r, g, b))
-            if len(cols) == 2:
+            if mx < 30:
+                continue  # near-black carries no glow
+            s = (mx - mn) / mx if mx else 0.0
+            entries.append((cnt / total, s, (r, g, b)))
+        if not entries:
+            return None
+
+        def close(a, b):
+            return (abs(a[0] - b[0]) < 40 and abs(a[1] - b[1]) < 40
+                    and abs(a[2] - b[2]) < 40)
+
+        def lift(rgb, s_floor, l_fix):
+            h, l, s = colorsys.rgb_to_hls(*(c / 255 for c in rgb))
+            if s < 0.04:  # monochrome art: hue is meaningless (0 = red) — stay neutral
+                r, g, b = colorsys.hls_to_rgb(h, min(max(l, 0.35), 0.65), s)
+            else:
+                r, g, b = colorsys.hls_to_rgb(h, l_fix, max(s, s_floor))
+            return "#%02x%02x%02x" % (round(r * 255), round(g * 255), round(b * 255))
+
+        picks = []
+        vivid = [e for e in entries if e[1] >= 0.40 and max(e[2]) >= 60]
+        if vivid:
+            picks.append(max(vivid, key=lambda e: e[0] * e[1])[2])
+        for _frac, _s, rgb in sorted(entries, reverse=True):
+            if all(not close(rgb, c) for c in picks):
+                picks.append(rgb)
+            if len(picks) == 2:
                 break
-        return cols or None
+        if not picks:
+            picks = [entries[0][2]]
+        out = [lift(picks[0], 0.72, 0.52)]
+        if len(picks) > 1:
+            out.append(lift(picks[1], 0.45, 0.58))
+        return out
     except Exception:
         return None
 
@@ -1186,12 +1229,13 @@ def resolve_play(req):
         rec["cached"] = is_cached(video_id)
         idx["songs"][video_id] = rec
         save_index(idx)
-    if not rec.get("palette"):
+    if not rec.get("palette") or rec.get("pal_v") != PALETTE_VER:
         pal = palette_for(rec.get("art", ""), video_id)
         if pal:
             with _index_lock:
                 idx = load_index()
                 idx["songs"][video_id]["palette"] = pal
+                idx["songs"][video_id]["pal_v"] = PALETTE_VER
                 save_index(idx)
                 rec["palette"] = pal
     return {"videoId": video_id, "title": rec.get("title", song["title"]),
