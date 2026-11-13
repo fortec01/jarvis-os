@@ -27,6 +27,25 @@
 #                 Only its import is used; its browser driver is
 #                 never launched. Scrapling's own browser/stealth
 #                 tier is NOT installed — Chromium-class RAM.
+#
+# v0.4 adds eyes, YouTube data and a downloader (agent stays
+# stdlib-only; the tools below are stdlib Python too):
+#   moli        — from-scratch Rust headless browser (V8 + Servo
+#                 Stylo, Apache-2.0), pinned 1.1.24 (tarball
+#                 sha256-verified below, amd64). DOM-first like
+#                 lightpanda, PLUS on-demand layout: real
+#                 screenshots + CDP screencast frames at ~84 MB
+#                 measured peak — the agent relays the frames so
+#                 eres can watch him browse live (/watch).
+#                 glibc-linked like lightpanda → same loader
+#                 wrapper through /opt/glibc.
+#   yt          — YouTube data tool: search/info/transcripts/
+#                 channels via the Invidious public API (auto-
+#                 discovered api-enabled instances) + RSS +
+#                 oEmbed fallbacks.
+#   getmedia    — media downloader via public Cobalt API
+#                 instances (the instance fetches and tunnels
+#                 the file, so downloads work from this box).
 FROM debian:bookworm-slim AS glibc-src
 
 FROM alpine:3.22
@@ -34,6 +53,8 @@ FROM alpine:3.22
 ARG TARGETARCH
 ARG S6_VERSION=v3.2.0.0
 ARG LIGHTPANDA_VERSION=1.0.3
+ARG MOLI_VERSION=1.1.24
+ARG MOLI_SHA256_AMD64=09e54e48be914df9596e8b9046cd2e1c67d5911761a09b0445488dd5d39c56d6
 
 # python3      -> the agent runtime (stdlib-only code, zero pip deps)
 # py3-pillow   -> the visual shell renderer
@@ -45,9 +66,9 @@ ARG LIGHTPANDA_VERSION=1.0.3
 COPY --from=glibc-src /usr/lib /opt/glibc-root/lib
 RUN apk add --no-cache python3 py3-pillow font-dejavu git curl ca-certificates bubblewrap py3-pip xz \
     && case "$TARGETARCH" in \
-         amd64|"") S6_ARCH=x86_64; LP_ARCH=x86_64; GLIBC_LIBDIR=x86_64-linux-gnu; GLIBC_LOADER=ld-linux-x86-64.so.2; PW_PLAT=manylinux1_x86_64 ;; \
-         arm64) S6_ARCH=aarch64; LP_ARCH=aarch64; GLIBC_LIBDIR=aarch64-linux-gnu; GLIBC_LOADER=ld-linux-aarch64.so.1; PW_PLAT=manylinux_2_17_aarch64 ;; \
-         *) S6_ARCH=$TARGETARCH; LP_ARCH=$TARGETARCH; GLIBC_LIBDIR=x86_64-linux-gnu; GLIBC_LOADER=ld-linux-x86-64.so.2; PW_PLAT=manylinux1_x86_64 ;; \
+         amd64|"") S6_ARCH=x86_64; LP_ARCH=x86_64; MOLI_ARCH=x86_64; GLIBC_LIBDIR=x86_64-linux-gnu; GLIBC_LOADER=ld-linux-x86-64.so.2; PW_PLAT=manylinux1_x86_64 ;; \
+         arm64) S6_ARCH=aarch64; LP_ARCH=aarch64; MOLI_ARCH=aarch64; GLIBC_LIBDIR=aarch64-linux-gnu; GLIBC_LOADER=ld-linux-aarch64.so.1; PW_PLAT=manylinux_2_17_aarch64 ;; \
+         *) S6_ARCH=$TARGETARCH; LP_ARCH=$TARGETARCH; MOLI_ARCH=x86_64; GLIBC_LIBDIR=x86_64-linux-gnu; GLIBC_LOADER=ld-linux-x86-64.so.2; PW_PLAT=manylinux1_x86_64 ;; \
        esac \
     && curl -fsSL -o /tmp/s6-noarch.tar.xz \
          https://github.com/just-containers/s6-overlay/releases/download/${S6_VERSION}/s6-overlay-noarch.tar.xz \
@@ -65,6 +86,15 @@ RUN apk add --no-cache python3 py3-pillow font-dejavu git curl ca-certificates b
     && chmod +x /opt/jarvisos/bin/lightpanda-real \
     && printf '#!/bin/sh\nexec /opt/glibc/%s --library-path /opt/glibc/lib /opt/jarvisos/bin/lightpanda-real "$@"\n' "${GLIBC_LOADER}" > /usr/local/bin/lightpanda \
     && chmod +x /usr/local/bin/lightpanda \
+    && curl -fsSL -o /tmp/moli.tar.gz \
+         https://github.com/lexmount/moli/releases/download/v${MOLI_VERSION}/moli-${MOLI_ARCH}-unknown-linux-gnu.tar.gz \
+    && if [ "$MOLI_ARCH" = "x86_64" ]; then echo "${MOLI_SHA256_AMD64}  /tmp/moli.tar.gz" | sha256sum -c -; fi \
+    && tar -xzf /tmp/moli.tar.gz -C /tmp \
+    && cp /tmp/moli-v${MOLI_VERSION}-${MOLI_ARCH}-unknown-linux-gnu/moli /opt/jarvisos/bin/moli-real \
+    && chmod +x /opt/jarvisos/bin/moli-real \
+    && rm -rf /tmp/moli.tar.gz /tmp/moli-v${MOLI_VERSION}-${MOLI_ARCH}-unknown-linux-gnu \
+    && printf '#!/bin/sh\nexec /opt/glibc/%s --library-path /opt/glibc/lib /opt/jarvisos/bin/moli-real "$@"\n' "${GLIBC_LOADER}" > /usr/local/bin/moli \
+    && chmod +x /usr/local/bin/moli \
     && echo "${PW_PLAT}" > /opt/jarvisos/patchright-platform.txt \
     && adduser -D jarvis
 
@@ -75,8 +105,10 @@ COPY tools/ tools/
 COPY rootfs/ /
 # The s6 run script must be executable in the image even when the
 # git checkout stored it as 0644 (e.g. uploaded via GitHub web UI).
-RUN chmod +x /etc/services.d/jarvisos/run tools/webfetch \
-    && ln -s /opt/jarvisos/tools/webfetch /usr/local/bin/webfetch
+RUN chmod +x /etc/services.d/jarvisos/run tools/webfetch tools/yt tools/getmedia \
+    && ln -s /opt/jarvisos/tools/webfetch /usr/local/bin/webfetch \
+    && ln -s /opt/jarvisos/tools/yt /usr/local/bin/yt \
+    && ln -s /opt/jarvisos/tools/getmedia /usr/local/bin/getmedia
 
 # Scrapling HTTP tier in its own venv (musl-native wheels for
 # curl_cffi / lxml / orjson). patchright is imported by Scrapling
