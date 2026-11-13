@@ -46,7 +46,18 @@
 #   getmedia    — media downloader via public Cobalt API
 #                 instances (the instance fetches and tunnels
 #                 the file, so downloads work from this box).
+#
+# v0.4.1 fix: Moli also links the font/text stack (fontconfig,
+# freetype, expat, png, brotli). bookworm-slim does not ship
+# those, so in v0.4 the loader fell back to ALPINE's musl builds
+# in /usr/lib and Moli segfaulted on startup (IFUNC memmove
+# clash). The glibc-src stage now installs the Debian packages
+# so the real glibc builds ride along into /opt/glibc/lib.
 FROM debian:bookworm-slim AS glibc-src
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+         libbrotli1 libfontconfig1 libfreetype6 libexpat1 libpng16-16 \
+    && rm -rf /var/lib/apt/lists/*
 
 FROM alpine:3.22
 
