@@ -275,3 +275,27 @@ three new panels (WATCH HIM BROWSE / YOUTUBE / DOWNLOAD MEDIA).
   seconds to land — the session thread drains screencast
   frames on a 5s socket timeout between commands. Harmless;
   a shorter session-socket timeout is a v0.5 tidy-up.
+- **v0.4.2 — take-control (eres approved 2026-11-13, LIVE):**
+  eres can now drive his browser herself from the watch panel.
+  No open-source stack was adopted — Steel / easi.run /
+  BrowserPane / neko / Auto Browser are all real-Chromium or
+  WebRTC class (≥1–2 GB, extra ports); the lightweight pattern
+  (saidkick 2.0 design; nearai/ironclaw) is CDP screencast out
+  + Input events in, which extends v0.4's watch layer directly
+  (research: ~/workspace/jarvis/research-takeover-control.md).
+  Agent: POST /watch/input {kind: click|type|key|scroll} →
+  Input.dispatchMouseEvent / insertText / dispatchKeyEvent on
+  the same CDP session (scroll via evaluate); GET /watch status
+  now also reports the page viewport and frame size so the face
+  can map a tap on the picture to page coordinates exactly.
+  Face: "🖱 take control" toggle — tap the live picture to
+  click, a type box, Enter/Tab/Esc/Backspace keys, scroll
+  buttons. Also fixes the wart above: the session socket
+  timeout is 1.5s, and stop now lands in ~2s.
+  Verified locally AND live in the real box using the face's
+  own coordinate math: a tap on the Login link navigated to
+  /login; a tap on the username field + typing put
+  "jarvis-test" in the field, visible in the live frame
+  (test-out/watch-takecontrol-live.jpg).
+  Commits 18ae0b9 (agent) + 2192717 (face); deploy
+  dep-dbrgb2tbedkc73dhhbc0.
