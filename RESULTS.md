@@ -199,6 +199,20 @@ At eres's direction ("bake Lightpanda + Scrapling's HTTP tier"):
 - Deploys now go through the Render API with eres's key stored
   in the Secure Vault (custom.render connector) — no dashboard
   needed. v0.3.1 commit = e9227b9.
+- Speeds measured in-box (median of 3): curl 0.20s; lightpanda
+  0.30s (simple page) / 1.49s (JS page); webfetch 2.91s (mostly
+  Python stack startup on 0.1 CPU); run peak ~51 MB.
+- Full test-all pass (2026-11-13, eres's ask): webfetch --css
+  selector extraction WORKS (pulled exact quote texts);
+  **CDP interactive drive 8/8** — lightpanda serve + a stdlib
+  WebSocket/CDP client: open tab, navigate, read title, CLICK a
+  link and land on the target (iana.org), navigate to a login
+  form, TYPE username+password via Input.insertText (values
+  verified in-field), SUBMIT, land logged-in ("Logout" shown).
+  Bot-wall probes: nowsecure.nl passed both rungs (200);
+  g2.com walled BOTH (webfetch 403 "enable JS", lightpanda no
+  content) — the honest top of the in-box ladder; hardest
+  walls remain the future remote-stealth tier's job.
 
 ## Not yet done (deploy-time only)
 - Deploy: her Render login (Docker deploy of this folder) +
