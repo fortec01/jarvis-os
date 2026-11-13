@@ -430,3 +430,29 @@ link lands on the right version.
   <img>, with filters cleared, and as a CSS background, all five routes paint
   nothing. The face's art is a plain <img> on a public CDN (the agent fetches
   the same file fine for palettes); it renders normally in a real browser.
+
+### v0.5.3 — now-playing takes the whole screen (eres's correction, same night: "What are those extra stuff?")
+- **The mistake:** v0.5.2 redesigned the stage but left the player sitting inside
+  the dashboard page — search box, library, YouTube/download panels all around
+  it. Eres's reference is a full-screen takeover. **Fix (face.html):** on play,
+  #player gets class `np` → `position: fixed; inset: 0` overlay (z 40, under
+  the z-60 rim): stage flexes to full height, lyrics go bigger (clamp 42–108px),
+  controls collapse to a minimal bottom bar (pause, title/artist, state, thin
+  custom seek), ✕ top-right closes to a slim now-playing mini-bar in the panel
+  (reopen + play/pause), "all the words" becomes a corner toggle sheet.
+- **Real bug found by the screenshot rig:** `.panel { backdrop-filter: blur(4px) }`
+  makes the panel a containing block for fixed descendants — the overlay could
+  never have escaped it in ANY browser. playReq now moves #player to <body>
+  before showing it. (Moli honoured fixed for the body-level #glowFrame all
+  along; the capture proved the trap before it shipped broken.)
+- **Agent:** `hi_art()` — Spotify CDN cover swapped 300px → 640px
+  (ab67616d00001e02 → ab67616d0000b273) at resolve time, cached songs included,
+  so the full-screen backdrop stays sharp.
+- **Capture rig breakthrough:** Moli decodes raster images but rasterizes only
+  its CANVAS paint path into screenshots — the rig now draws the decoded art
+  onto a stage-sized canvas (same pixels, cover-crop). The v0.5.3 shot is the
+  real page: art full-screen, giant stacked words, amber block, rim, mini
+  controls. Commits 5daa536 (face) + 94fb28c (agent), deploy
+  dep-dbrjmod6e07s73bu6da0; live-verified (face markers, /music/play returns
+  the 640px art + vivid palette). Redeploy wiped the cache again — the song
+  re-downloads on next plays (instance weather applies, as ever).
