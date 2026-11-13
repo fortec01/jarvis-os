@@ -989,20 +989,23 @@ def _fetch_audio(video_id, part):
             total = 0
             t0 = time.time()
             # A tunnel can also fail by DRIPPING (seen live: one
-            # chunk, then a stall) — the 25s socket timeout trips
-            # on a dead tunnel and the 150s deadline on a hopeless
-            # drip; either way the next instance gets its turn.
+            # chunk, then nothing for minutes). With small reads,
+            # a dead tunnel trips the 25s socket timeout quickly,
+            # while a slow-but-alive one keeps completing reads
+            # and is allowed to finish — a 150s total deadline
+            # was tried first and killed a healthy 20 KB/s fetch
+            # at 84%, so the cap here is only a 900s safety net.
             with urllib.request.urlopen(req, timeout=25) as r, open(part, "wb") as f:
                 while True:
-                    chunk = r.read(16384)  # small reads: the deadline gets checked often
+                    chunk = r.read(16384)  # small reads: progress stays visible
                     if not chunk:
                         break
                     f.write(chunk)
                     total += len(chunk)
                     if total > 60 * 1024 * 1024:
                         raise RuntimeError("file too large for a song")
-                    if time.time() - t0 > 150:
-                        raise RuntimeError(f"tunnel via {api} too slow ({total} bytes in 150s)")
+                    if time.time() - t0 > 900:
+                        raise RuntimeError(f"tunnel via {api} still busy after 900s ({total} bytes)")
             if total < 20000:
                 raise RuntimeError(f"tunnel via {api} delivered only {total} bytes")
             return total
