@@ -53,6 +53,22 @@
 # in /usr/lib and Moli segfaulted on startup (IFUNC memmove
 # clash). The glibc-src stage now installs the Debian packages
 # so the real glibc builds ride along into /opt/glibc/lib.
+#
+# v0.5.1 toolkit (eres: "add node and other things needed,
+# open source and lightweight"): an agent that runs other
+# people's tools needs the standard runtimes those tools ship
+# for. All Alpine packages (musl-native, no glibc wrapper):
+#   nodejs+npm — Alpine 3.22 ships Node 22.23 LTS (MIT);
+#                MCP servers and the skills CLI run on npx.
+#   uv         — the Python tool runner (uvx) MCP servers use.
+#   bash       — skills/scripts assume it; BusyBox sh stays the
+#                /exec default for compatibility.
+#   ffmpeg     — media trim/convert/probe for the files the
+#                downloader brings home (music, video, voice).
+#   jq, ripgrep, sqlite, openssh-client, zip — small standards.
+# Deliberately NOT added (too heavy for a 512 MB box): Bun,
+# Deno, a C toolchain, Chromium. Disk cost of the set is
+# ~130 MB; idle RAM is unchanged (nothing new runs resident).
 FROM debian:bookworm-slim AS glibc-src
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -76,6 +92,7 @@ ARG MOLI_SHA256_AMD64=09e54e48be914df9596e8b9046cd2e1c67d5911761a09b0445488dd5d3
 # xz           -> build-time only, unpacks the s6-overlay tarballs
 COPY --from=glibc-src /usr/lib /opt/glibc-root/lib
 RUN apk add --no-cache python3 py3-pillow font-dejavu git curl ca-certificates bubblewrap py3-pip xz \
+    bash nodejs npm uv ffmpeg jq ripgrep sqlite openssh-client zip \
     && case "$TARGETARCH" in \
          amd64|"") S6_ARCH=x86_64; LP_ARCH=x86_64; MOLI_ARCH=x86_64; GLIBC_LIBDIR=x86_64-linux-gnu; GLIBC_LOADER=ld-linux-x86-64.so.2; PW_PLAT=manylinux1_x86_64 ;; \
          arm64) S6_ARCH=aarch64; LP_ARCH=aarch64; MOLI_ARCH=aarch64; GLIBC_LIBDIR=aarch64-linux-gnu; GLIBC_LOADER=ld-linux-aarch64.so.1; PW_PLAT=manylinux_2_17_aarch64 ;; \
