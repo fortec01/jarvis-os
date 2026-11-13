@@ -36,6 +36,9 @@ WORKDIR /opt/jarvisos
 COPY agent/agent.py agent/agent.py
 COPY shell/desktop.py shell/wallpaper.jpg shell/face.html shell/
 COPY rootfs/ /
+# The s6 run script must be executable in the image even when the
+# git checkout stored it as 0644 (e.g. uploaded via GitHub web UI).
+RUN chmod +x /etc/services.d/jarvisos/run
 
 ENV JARVIS_WORKSPACE=/home/jarvis/workspace \
     PORT=10000 \
