@@ -115,6 +115,91 @@ Built and tested locally (agent idle still **20.1 MB RSS**):
   s6-overlay pattern; exercised at first real image build
   (no Docker in this sandbox).
 
+## DEPLOYED + LIVE-TESTED (2026-11-13)
+- Repo: https://github.com/fortec01/jarvis-os (public; account
+  fortec01 — the existing account tied to fortecfficial01@
+  gmail.com; eres reset its password herself). Code updates
+  do NOT auto-deploy (no GitHub-app webhook on her Render
+  workspace for this account) — trigger deploys via the API.
+- Service: Render "jarvis-os", Singapore, free plan,
+  https://jarvis-os-8qa2.onrender.com (srv-dbrctedg1s2s7384n7c0).
+- First deploy FAILED: the s6 run script arrived via GitHub
+  web upload with mode 100644; fixed by Dockerfile chmod +x
+  (commit f124b3e). Env vars sent inside the create-service
+  payload were silently dropped by the API — set them via
+  PUT /services/{id}/env-vars, then trigger a deploy manually
+  (the PUT alone does not redeploy).
+- Live tests PASSED: /healthz; face page 200; /stats real
+  numbers (host-level /proc figures — the host's totals, not
+  the 512 MB cgroup slice; the watchdog enforces by RSS, so
+  the cap itself is real); bad/no token → 401; /exec runs as
+  user jarvis in /home/jarvis/workspace (6*7=42 written and
+  read back); watchdog killed a 600 MB hog at the 250 MB cap
+  in 1.6 s; task journal created a task; /desktop.png rendered
+  the full Nebula face with live values (test-out/
+  desktop-live-render.png).
+- DEPLOY-TIME GATE ANSWERED: bubblewrap does NOT work on
+  Render — "bwrap: Failed to make / slave: Permission
+  denied" (no unprivileged mount ops allowed). v0.2.1 makes
+  /exec self-heal: if bwrap itself errors, the command reruns
+  unsandboxed and the result is labelled
+  "bwrap-unavailable-fallback" (proven locally with a broken
+  bwrap shim). LIVE-PROVEN 2026-11-13 ~15:30 IST: default
+  /exec on the redeployed v0.2.1 returned code 0 with
+  sandbox "bwrap-unavailable-fallback" and 42 written/read.
+  v0.2.1 commit e4cede4.
+- Honest stats caveat: /stats and the face cards read the
+  Render HOST's /proc (host totals), not the 512 MB cgroup
+  slice — the memory cap is enforced by real RSS, so the cap
+  is real even though the displayed totals are the host's.
+- Free-tier behaviour: spins down after ~15 min idle; first
+  hit after a nap takes ~1 min to wake. Code changes do NOT
+  auto-deploy (no webhook from the fortec01 account to this
+  Render workspace) — trigger deploys via the API.
+- UPTIMEROBOT (registered at eres's ask, 2026-11-13): free
+  account under fortecfficial01@gmail.com; monitor "JarvisOS"
+  (id 804659658) checks /healthz every 5 min with email
+  alerts. Its FIRST check caught a real bug: monitors ping
+  with HEAD and the agent had no do_HEAD (501). v0.2.2 adds
+  do_HEAD (commit 1ee0d14); live HEAD re-verified 200 OK —
+  monitor flips Up at its next check. Side effect by design:
+  the 5-min pings keep the service awake (~744 of the 750
+  shared free hours/month; StrideSync shares the pool).
+- Token: JARVIS_PC_TOKEN is set on the service via the API
+  (value handed to eres in chat 2026-11-13; not recorded
+  here). Render API key: since saved by eres into the Secure
+  Vault (custom.render connector); deploys run through it.
+  Rotating the original chat-shared key remains her call.
+
+## v0.3 / v0.3.1 — the web ladder, DEPLOYED + LIVE-PROVEN (2026-11-13)
+At eres's direction ("bake Lightpanda + Scrapling's HTTP tier"):
+- **lightpanda 1.0.3** (AGPL-3.0, from-scratch Zig/V8 headless
+  browser) on PATH as `lightpanda`; telemetry disabled by env.
+- **webfetch** command: Scrapling 0.5.1 (BSD-3) HTTP tier in
+  /opt/jarvisos/venv — TLS-fingerprint-impersonating fetcher
+  (curl_cffi, native musllinux wheels) + adaptive parser.
+  Call: `webfetch <url> [--impersonate X] [--css SEL]`.
+- Ladder: curl → webfetch (clean fingerprint) → lightpanda
+  (real JS, DOM only, no screenshots) → remote stealth (later).
+- v0.3's two live failures and v0.3.1's fixes:
+  (1) gcompat could NOT carry Lightpanda (missing mallopt,
+  execveat, fcntl64; binary needs up to GLIBC_2.35) → the image
+  now carries a real Debian bookworm glibc (2.36) in /opt/glibc
+  and starts the binary through its loader via a wrapper.
+  (2) musl pip silently installed a patchright 0.0.1 placeholder
+  (real wheels are manylinux-tagged) → the build downloads the
+  real patchright 1.64.4 wheel for an explicit platform and
+  unpacks it into the venv; only its import is used.
+- Live proofs (deploy dep-dbrf07d9fdbs73e6hv7g, 2026-11-13):
+  `lightpanda version` → 1.0.3; a JS-rendered page
+  (quotes.toscrape.com/js) returned its JS-injected text;
+  `webfetch https://example.com` → STATUS 200 + body text;
+  impersonation check inside the box: chrome JA3 6f17b7e1…
+  vs firefox JA3 424f6d9c… (distinct per identity).
+- Deploys now go through the Render API with eres's key stored
+  in the Secure Vault (custom.render connector) — no dashboard
+  needed. v0.3.1 commit = e9227b9.
+
 ## Not yet done (deploy-time only)
 - Deploy: her Render login (Docker deploy of this folder) +
   JARVIS_PC_TOKEN secret in Render env vars.
