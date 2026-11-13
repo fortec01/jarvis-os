@@ -740,7 +740,8 @@ COBALT_SEEDS = [s for s in [os.environ.get("GETMEDIA_API", ""),
                             "https://api.cobalt.canine.tools"] if s]
 FORBIDDEN_WORDS = ["remix", "remaster", "remastered", "live", "acoustic",
                    "cover", "karaoke", "instrumental", "slowed", "reverb",
-                   "bassboost", "bassboosted", "8daudio", "concert", "acapella"]
+                   "bassboost", "bassboosted", "8daudio", "concert", "acapella",
+                   "lyrics", "lyric", "nightcore", "sped"]
 _index_lock = threading.Lock()
 _dl_state = {}  # videoId -> {"done": bool, "error": str|None, "bytes": int}
 _inv_cache = {"hosts": [], "ts": 0.0}
@@ -848,7 +849,7 @@ def score_candidate(song, cand):
     stitle, sartist, sdur = song["title"], song.get("artist", ""), song.get("duration", 0)
     name = _ratio(stitle, cand["title"])
     author = max(_ratio(sartist, cand.get("author", "")),
-                 90.0 if _slug(sartist) and _slug(sartist) in _slug(cand["title"]) else 0.0,
+                 60.0 if _slug(sartist) and _slug(sartist) in _slug(cand["title"]) else 0.0,
                  90.0 if _slug(sartist) and _slug(sartist) in _slug(cand.get("author", "")) else 0.0)
     cdur = cand.get("duration", 0)
     dur = math.exp(-0.1 * abs(sdur - cdur)) * 100 if sdur and cdur else 55.0
@@ -949,28 +950,63 @@ def is_cached(video_id):
     return os.path.isfile(p) and os.path.getsize(p) > 20000
 
 
-def _cobalt_audio_url(video_id):
+def _cobalt_audio_url_from(api, video_id):
     payload = json.dumps({"url": f"https://www.youtube.com/watch?v={video_id}",
                           "videoQuality": "720", "downloadMode": "audio",
                           "audioFormat": "mp3", "filenameStyle": "basic"}).encode()
+    _, body = _http(api + "/", timeout=30, data=payload, ctype="application/json")
+    res = json.loads(body)
+    status = res.get("status")
+    if status in ("tunnel", "redirect", "local-processing") and res.get("url"):
+        return res["url"]
+    if status == "picker":
+        for item in res.get("picker", []):
+            if item.get("url"):
+                return item["url"]
+        if res.get("audio"):
+            return res["audio"]
+    raise RuntimeError(f"cobalt {api}: {status} {res.get('error', '')}")
+
+
+def _fetch_audio(video_id, part):
+    """Fetch the MP3, failing over across Cobalt instances.
+
+    Community instances occasionally hand out tunnels that deliver
+    an empty body (seen live 2026-11-13), and the first seed being
+    able to MINT a tunnel says nothing about whether its tunnel
+    host will actually serve bytes — so an attempt only counts
+    when >=20 KB really land, else the next instance is tried.
+    """
     last = None
-    for api in COBALT_SEEDS:
+    seeds = list(COBALT_SEEDS)
+    if len(seeds) > 1:
+        seeds.append(seeds[0])
+    for api in seeds:
         try:
-            _, body = _http(api + "/", timeout=30, data=payload, ctype="application/json")
-            res = json.loads(body)
-            status = res.get("status")
-            if status in ("tunnel", "redirect", "local-processing") and res.get("url"):
-                return res["url"]
-            if status == "picker":
-                for item in res.get("picker", []):
-                    if item.get("url"):
-                        return item["url"]
-                if res.get("audio"):
-                    return res["audio"]
-            last = RuntimeError(f"cobalt {api}: {status} {res.get('error', '')}")
+            src = _cobalt_audio_url_from(api, video_id)
+            req = urllib.request.Request(src)
+            req.add_header("User-Agent", UA)
+            total = 0
+            with urllib.request.urlopen(req, timeout=60) as r, open(part, "wb") as f:
+                while True:
+                    chunk = r.read(65536)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    total += len(chunk)
+                    if total > 60 * 1024 * 1024:
+                        raise RuntimeError("file too large for a song")
+            if total < 20000:
+                raise RuntimeError(f"tunnel via {api} delivered only {total} bytes")
+            return total
         except Exception as e:
             last = e
-    raise RuntimeError(f"cobalt failed everywhere: {last}")
+            try:
+                os.remove(part)
+            except Exception:
+                pass
+            time.sleep(2)
+    raise RuntimeError(f"audio fetch failed on all instances: {last}")
 
 
 def _download(video_id):
@@ -978,20 +1014,7 @@ def _download(video_id):
     part = song_file(video_id) + ".part"
     try:
         os.makedirs(MUSIC_DIR, exist_ok=True)
-        src = _cobalt_audio_url(video_id)
-        req = urllib.request.Request(src)
-        req.add_header("User-Agent", UA)
-        with urllib.request.urlopen(req, timeout=60) as r, open(part, "wb") as f:
-            while True:
-                chunk = r.read(65536)
-                if not chunk:
-                    break
-                f.write(chunk)
-                st["bytes"] += len(chunk)
-                if st["bytes"] > 60 * 1024 * 1024:
-                    raise RuntimeError("file too large for a song")
-        if st["bytes"] < 20000:
-            raise RuntimeError("downloaded file suspiciously small")
+        st["bytes"] = _fetch_audio(video_id, part)
         os.replace(part, song_file(video_id))
         with _index_lock:
             idx = load_index()
